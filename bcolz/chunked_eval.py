@@ -2,7 +2,7 @@
 #
 #       License: BSD
 #       Created: July 15, 2014
-#       Author:  Francesc Alted - francesc@blosc.io
+#       Author:  Francesc Alted - francesc@blosc.org
 #
 ########################################################################
 
@@ -13,43 +13,52 @@ from __future__ import absolute_import
 
 import sys
 import math
+
 import numpy as np
 import bcolz
 from bcolz.py2help import xrange
 
 if bcolz.numexpr_here:
     from numexpr.expressions import functions as numexpr_functions
+if bcolz.dask_here:
+    import dask.array as da
 
 
-def _getvars(expression, user_dict, depth, vm):
-    """Get the variables in `expression`.
+def is_sequence_like(var):
+    "Check whether `var` looks like a sequence (strings are not included)."
+    if hasattr(var, "__len__"):
+        if isinstance(var, (bytes, str)):
+            return False
+        else:
+            return True
+    return False
 
-    `depth` specifies the depth of the frame in order to reach local
-    or global variables.
-    """
+
+def _getvars(expression, user_dict, vm):
+    """Get the variables in `expression`."""
 
     cexpr = compile(expression, '<string>', 'eval')
-    if vm == "python":
+    if vm in ("python", "dask"):
         exprvars = [var for var in cexpr.co_names
                     if var not in ['None', 'False', 'True']]
     else:
         # Check that var is not a numexpr function here.  This is useful for
         # detecting unbound variables in expressions.  This is not necessary
-        # for the 'python' engine.
+        # for the 'python' or 'dask' engines.
         exprvars = [var for var in cexpr.co_names
                     if var not in ['None', 'False', 'True']
                     and var not in numexpr_functions]
 
     # Get the local and global variable mappings of the user frame
     user_locals, user_globals = {}, {}
-    user_frame = sys._getframe(depth)
+    user_frame = sys._getframe(2)
     user_locals = user_frame.f_locals
     user_globals = user_frame.f_globals
 
     # Look for the required variables
     reqvars = {}
     for var in exprvars:
-        # Get the value.
+        # Get the value
         if var in user_dict:
             val = user_dict[var]
         elif var in user_locals:
@@ -62,7 +71,7 @@ def _getvars(expression, user_dict, depth, vm):
             val = None
         # Check the value.
         if (vm == "numexpr" and
-            hasattr(val, 'dtype') and hasattr(val, "__len__") and
+            hasattr(val, 'dtype') and is_sequence_like(val) and
                 val.dtype.str[1:] == 'u8'):
             raise NotImplementedError(
                 "variable ``%s`` refers to "
@@ -78,9 +87,9 @@ def _getvars(expression, user_dict, depth, vm):
 _eval = eval
 
 
-def eval(expression, vm=None, out_flavor=None, user_dict={}, **kwargs):
-    """
-    eval(expression, vm=None, out_flavor=None, user_dict=None, **kwargs)
+def eval(expression, vm=None, out_flavor=None, user_dict={}, blen=None,
+         **kwargs):
+    """eval(expression, vm=None, out_flavor=None, user_dict=None, blen=None, **kwargs)
 
     Evaluate an `expression` and return the result.
 
@@ -91,43 +100,53 @@ def eval(expression, vm=None, out_flavor=None, user_dict={}, **kwargs):
         'b' are variable names to be taken from the calling function's frame.
         These variables may be scalars, carrays or NumPy arrays.
     vm : string
-        The virtual machine to be used in computations.  It can be 'numexpr'
-        or 'python'.  The default is to use 'numexpr' if it is installed.
+        The virtual machine to be used in computations.  It can be 'numexpr',
+        'python' or 'dask'.  The default is to use 'numexpr' if it is
+        installed.
     out_flavor : string
-        The flavor for the `out` object.  It can be 'carray' or 'numpy'.
+        The flavor for the `out` object.  It can be 'bcolz' or 'numpy'.
+        If None, the value is get from `bcolz.defaults.out_flavor`.
     user_dict : dict
         An user-provided dictionary where the variables in expression
         can be found by name.
+    blen : int
+        The length of the block to be evaluated in one go internally.
+        The default is a value that has been tested experimentally and
+        that offers a good enough peformance / memory usage balance.
     kwargs : list of parameters or dictionary
         Any parameter supported by the carray constructor.
 
     Returns
     -------
-    out : carray object
-        The outcome of the expression.  You can tailor the
-        properties of this carray by passing additional arguments
-        supported by carray constructor in `kwargs`.
+    out : bcolz or numpy object
+        The outcome of the expression.  In case out_flavor='bcolz',
+        you can adjust the properties of this object by passing any
+        additional arguments supported by the carray constructor in
+        `kwargs`.
 
     """
     if vm is None:
-        vm = bcolz.defaults.eval_vm
-    if vm not in ("numexpr", "python"):
-        raise ValueError("`vm` must be either 'numexpr' or 'python'")
+        vm = bcolz.defaults.vm
+    if vm not in ("numexpr", "python", "dask"):
+        raise ValueError("`vm` must be either 'numexpr', 'python' or 'dask'")
+    if vm == 'numexpr' and not bcolz.numexpr_here:
+        raise ImportError("eval(..., vm='numexpr') requires numexpr, "
+                          "which is not installed.")
+    if vm == 'dask' and not bcolz.dask_here:
+        raise ImportError("eval(..., vm='dask') requires dask, "
+                          "which is not installed.")
 
     if out_flavor is None:
-        out_flavor = bcolz.defaults.eval_out_flavor
-    if out_flavor not in ("carray", "numpy"):
-        raise ValueError("`out_flavor` must be either 'carray' or 'numpy'")
+        out_flavor = bcolz.defaults.out_flavor
 
     # Get variables and column names participating in expression
-    depth = kwargs.pop('depth', 2)
-    vars = _getvars(expression, user_dict, depth, vm=vm)
+    vars = _getvars(expression, user_dict, vm=vm)
 
     # Gather info about sizes and lengths
     typesize, vlen = 0, 1
     for name in vars:
         var = vars[name]
-        if hasattr(var, "__len__") and not hasattr(var, "dtype"):
+        if is_sequence_like(var) and not hasattr(var, "dtype"):
             raise ValueError("only numpy/carray sequences supported")
         if hasattr(var, "dtype") and not hasattr(var, "__len__"):
             continue
@@ -138,70 +157,90 @@ def eval(expression, vm=None, out_flavor=None, user_dict={}, **kwargs):
                 typesize += var.dtype.itemsize
             else:
                 raise ValueError("only numpy/carray objects supported")
-        if hasattr(var, "__len__"):
+        if is_sequence_like(var):
             if vlen > 1 and vlen != len(var):
                 raise ValueError("arrays must have the same length")
             vlen = len(var)
 
     if typesize == 0:
         # All scalars
-        if vm == "python":
+        if vm in ("python", "dask"):
             return _eval(expression, vars)
         else:
             return bcolz.numexpr.evaluate(expression, local_dict=vars)
 
-    return _eval_blocks(expression, vars, vlen, typesize, vm, out_flavor,
+    return _eval_blocks(expression, vars, vlen, typesize, vm, out_flavor, blen,
                         **kwargs)
 
 
-def _eval_blocks(expression, vars, vlen, typesize, vm, out_flavor,
+def _eval_blocks(expression, vars, vlen, typesize, vm, out_flavor, blen,
                  **kwargs):
     """Perform the evaluation in blocks."""
 
-    # Compute the optimal block size (in elements)
-    # The next is based on experiments with bench/ctable-query.py
-    # and the 'movielens-bench' repository
-    if vm == "numexpr":
-        bsize = 2**24
-    else:
-        bsize = 2**22
-    bsize //= typesize
-    # Evaluation seems more efficient if block size is a power of 2
-    bsize = 2 ** (int(math.log(bsize, 2)))
-    if vlen < 100*1000:
-        bsize //= 8
-    elif vlen < 1000*1000:
-        bsize //= 4
-    elif vlen < 10*1000*1000:
-        bsize //= 2
-    # Protection against too large atomsizes
-    if bsize == 0:
-        bsize = 1
+    if not blen:
+        # Compute the optimal block size (in elements)
+        # The next is based on experiments with bench/ctable-query.py
+        # and the 'movielens-bench' repository
+        if vm == "numexpr":
+            bsize = 2**23
+        elif vm == "dask":
+            bsize = 2**25
+        else:  # python
+            bsize = 2**21
+        blen = int(bsize / typesize)
+        # Protection against too large atomsizes
+        if blen == 0:
+            blen = 1
+
+    if vm == "dask":
+        if 'da' in vars:
+            raise NameError(
+                "'da' is reserved as a prefix for dask.array. "
+                "Please use another prefix")
+        for name in vars:
+            var = vars[name]
+            if is_sequence_like(var):
+                vars[name] = da.from_array(var, chunks=(blen,) + var.shape[1:])
+        # Build the expression graph
+        vars['da'] = da
+        da_expr = _eval(expression, vars)
+        if out_flavor in ("bcolz", "carray") and da_expr.shape:
+            result = bcolz.zeros(da_expr.shape, da_expr.dtype, **kwargs)
+            # Store while compute expression graph
+            da.store(da_expr, result)
+            return result
+        else:
+            # Store while compute
+            return np.array(da_expr)
+
+    # Check whether we have a re_evaluate() function in numexpr
+    re_evaluate = bcolz.numexpr_here and hasattr(bcolz.numexpr, "re_evaluate")
 
     vars_ = {}
-    # Get temporaries for vars
+    # Get containers for vars
     maxndims = 0
     for name in vars:
         var = vars[name]
-        if hasattr(var, "__len__"):
+        if is_sequence_like(var):
             ndims = len(var.shape) + len(var.dtype.shape)
             if ndims > maxndims:
                 maxndims = ndims
-            if len(var) > bsize and hasattr(var, "_getrange"):
-                vars_[name] = np.empty(bsize, dtype=var.dtype)
+            if len(var) > blen and hasattr(var, "_getrange"):
+                    shape = (blen, ) + var.shape[1:]
+                    vars_[name] = np.empty(shape, dtype=var.dtype)
 
-    for i in xrange(0, vlen, bsize):
-        # Get buffers for vars
+    for i in xrange(0, vlen, blen):
+        # Fill buffers for vars
         for name in vars:
             var = vars[name]
-            if hasattr(var, "__len__") and len(var) > bsize:
+            if is_sequence_like(var) and len(var) > blen:
                 if hasattr(var, "_getrange"):
-                    if i+bsize < vlen:
-                        var._getrange(i, bsize, vars_[name])
+                    if i+blen < vlen:
+                        var._getrange(i, blen, vars_[name])
                     else:
                         vars_[name] = var[i:]
                 else:
-                    vars_[name] = var[i:i+bsize]
+                    vars_[name] = var[i:i+blen]
             else:
                 if hasattr(var, "__getitem__"):
                     vars_[name] = var[:]
@@ -212,14 +251,17 @@ def _eval_blocks(expression, vars, vlen, typesize, vm, out_flavor,
         if vm == "python":
             res_block = _eval(expression, vars_)
         else:
-            try:
-                res_block = bcolz.numexpr.evaluate(expression,
-                                                   local_dict=vars_)
-            except ValueError:
-                # numexpr cannot handle this. Fall back to a pure "python" VM.
-                return _eval_blocks(
-                    expression, vars, vlen, typesize, "python",
-                    out_flavor, **kwargs)
+            if i == 0 or not re_evaluate:
+                try:
+                    res_block = bcolz.numexpr.evaluate(expression,
+                                                       local_dict=vars_)
+                except ValueError:
+                    # numexpr cannot handle this, so fall back to "python" vm
+                    return _eval_blocks(
+                        expression, vars, vlen, typesize, "python",
+                        out_flavor, blen, **kwargs)
+            else:
+                res_block = bcolz.numexpr.re_evaluate(local_dict=vars_)
 
         if i == 0:
             # Detection of reduction operations
@@ -234,21 +276,21 @@ def _eval_blocks(expression, vars, vlen, typesize, vm, out_flavor,
                 result = res_block
                 continue
             # Get a decent default for expectedlen
-            if out_flavor == "carray":
+            if out_flavor in ("bcolz", "carray"):
                 nrows = kwargs.pop('expectedlen', vlen)
                 result = bcolz.carray(res_block, expectedlen=nrows, **kwargs)
             else:
                 out_shape = list(res_block.shape)
                 out_shape[0] = vlen
                 result = np.empty(out_shape, dtype=res_block.dtype)
-                result[:bsize] = res_block
+                result[:blen] = res_block
         else:
             if scalar or dim_reduction:
                 result += res_block
-            elif out_flavor == "carray":
+            elif out_flavor in ("bcolz", "carray"):
                 result.append(res_block)
             else:
-                result[i:i+bsize] = res_block
+                result[i:i+blen] = res_block
 
     if isinstance(result, bcolz.carray):
         result.flush()

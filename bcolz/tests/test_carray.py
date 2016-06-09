@@ -3,7 +3,7 @@
 #
 #       License: BSD
 #       Created: August 5, 2010
-#       Author:  Francesc Alted - francesc@blosc.io
+#       Author:  Francesc Alted - francesc@blosc.org
 #
 ########################################################################
 
@@ -14,22 +14,69 @@ import sys
 import struct
 import shutil
 import textwrap
+import pickle
+import ctypes
+from distutils.version import LooseVersion
+import inspect
 
 import numpy as np
-from numpy.testing import assert_array_equal, assert_allclose
+from numpy.testing import (
+    assert_array_equal, assert_array_almost_equal, assert_allclose)
 from bcolz.tests import common
 from bcolz.tests.common import (
     MayBeDiskTest, TestCase, unittest, skipUnless, SkipTest)
 import bcolz
-from bcolz.py2help import xrange, PY2
+from bcolz.py2help import xrange, PY2, _inttypes
 from bcolz.carray_ext import chunk
 from bcolz import carray
-import pickle
+from bcolz.utils import to_ndarray
 
 is_64bit = (struct.calcsize("P") == 8)
 
 if sys.version_info >= (3, 0):
     long = int
+
+
+class initTest(TestCase):
+
+    def test_roundtrip_from_transpose1(self):
+        """Testing `__init__` called without `dtype` and a non-contiguous (transposed) array."""
+        transposed_array = np.array([[0, 1, 2], [2, 1, 0]]).T
+        assert_array_equal(transposed_array, carray(transposed_array, dtype=None))
+
+    def test_roundtrip_from_transpose2(self):
+        """Testing `__init__` called with `dtype` and a non-contiguous (transposed) array."""
+        transposed_array = np.array([[0, 1, 2], [2, 1, 0]]).T
+        assert_array_equal(transposed_array, carray(transposed_array, dtype=transposed_array.dtype))
+
+    @unittest.skipIf(not bcolz.pandas_here, "cannot import pandas")
+    def test_roundtrip_from_dataframe1(self):
+        """Testing `__init__` called without `dtype` and a dataframe over non-contiguous data."""
+        import pandas as pd
+        df = pd.DataFrame(data={
+            'a': np.arange(3),
+            'b': np.arange(3)[::-1]
+        })
+        assert_array_equal(df, carray(df, dtype=None))
+
+    @unittest.skipIf(not bcolz.pandas_here, "cannot import pandas")
+    def test_roundtrip_from_dataframe2(self):
+        """Testing `__init__` called with `dtype` and a dataframe over non-contiguous data."""
+        import pandas as pd
+        df = pd.DataFrame(data={
+            'a': np.arange(3),
+            'b': np.arange(3)[::-1]
+        })
+        ca = carray(df, dtype=np.dtype(np.float))
+        assert_array_equal(df, ca)
+        self.assertEqual(ca.dtype, np.dtype(np.float),
+                         msg='carray has been created with invalid dtype')
+
+    def test_dtype_None(self):
+        """Testing `utils.to_ndarray` called without `dtype` and a non-contiguous (transposed) array."""
+        array = np.array([[0, 1, 2], [2, 1, 0]]).T
+        self.assertTrue(to_ndarray(array, None, safe=True).flags.contiguous,
+                        msg='to_ndarray: Non contiguous arrays are not being consolidated when dtype is None')
 
 
 class chunkTest(TestCase):
@@ -245,6 +292,17 @@ class getitemTest(MayBeDiskTest):
         # print "b[sl]->", `b[sl]`
         self.assertRaises(NotImplementedError, b.__getitem__, sl)
 
+    def test06(self):
+        """Testing `__getitem()__` with chunks not multiple of blocksize."""
+        a = np.arange(1e5)
+        b = bcolz.carray(a, chunklen=10000, rootdir=self.rootdir)
+        sl = -2   # second last element
+        # print "b[sl]->", `b[sl]`
+        assert_array_equal(a[sl], b[sl], "Arrays are not equal")
+        sl = -1   # last element
+        # print "b[sl]->", `b[sl]`
+        assert_array_equal(a[sl], b[sl], "Arrays are not equal")
+
 
 class getitemMemoryTest(getitemTest, TestCase):
     disk = False
@@ -292,7 +350,7 @@ class setitemTest(MayBeDiskTest):
         # print "b->", `b`
         assert_array_equal(a, b[:], "__setitem__ not working correctly")
 
-    def test03(self):
+    def test03a(self):
         """Testing `__setitem()__` method with the complete range"""
         a = np.arange(1e2)
         b = bcolz.carray(a, chunklen=10, rootdir=self.rootdir)
@@ -300,6 +358,16 @@ class setitemTest(MayBeDiskTest):
         a[:] = np.arange(10., 1e2 + 10.)
         # print "b->", `b`
         assert_array_equal(a, b[:], "__setitem__ not working correctly")
+
+    def test03b(self):
+        """Testing `__setitem()__` method with the complete range (large)"""
+        a = np.arange(1e6)
+        b = bcolz.carray(a, chunklen=1000-1)
+        c = bcolz.carray(a, chunklen=1000-2, rootdir=self.rootdir)
+        c[:] = b[:]
+        # print "b->", `b`
+        # print "c->", `c`
+        assert_array_equal(b[:], c[:], "__setitem__ not working correctly")
 
     def test04a(self):
         """Testing `__setitem()__` method with start:stop:step"""
@@ -594,7 +662,7 @@ class copyTest(MayBeDiskTest):
 
     def tearDown(self):
         # Restore defaults
-        bcolz.cparams.setdefaults(clevel=5, shuffle=True, cname='blosclz')
+        bcolz.cparams.setdefaults(clevel=5, shuffle=bcolz.SHUFFLE, cname='blosclz')
         MayBeDiskTest.tearDown(self)
 
     def test00(self):
@@ -630,7 +698,7 @@ class copyTest(MayBeDiskTest):
         a = np.linspace(-1., 1., self.N)
         b = bcolz.carray(a, rootdir=self.rootdir)
         bcolz.cparams.setdefaults(clevel=1)
-        c = b.copy(cparams=bcolz.cparams(shuffle=False))
+        c = b.copy(cparams=bcolz.cparams(shuffle=bcolz.NOSHUFFLE))
         # print "b.cbytes, c.cbytes:", b.cbytes, c.cbytes
         self.assertTrue(b.cbytes < c.cbytes, "shuffle not changed")
 
@@ -638,7 +706,7 @@ class copyTest(MayBeDiskTest):
         """Testing copy() with no shuffle (setdefaults version)"""
         a = np.linspace(-1., 1., self.N)
         b = bcolz.carray(a, rootdir=self.rootdir)
-        bcolz.cparams.setdefaults(shuffle=False)
+        bcolz.cparams.setdefaults(shuffle=bcolz.NOSHUFFLE)
         c = b.copy()
         # print "b.cbytes, c.cbytes:", b.cbytes, c.cbytes
         self.assertTrue(b.cbytes < c.cbytes, "shuffle not changed")
@@ -1249,7 +1317,7 @@ class fancy_indexing_getitemTest(TestCase):
         a = np.arange(1, 101)
         b = bcolz.carray(a)
         c = b[[1.1, 3.3]]
-        r = a[[1.1, 3.3]]
+        r = a[[1, 3]]
         assert_array_equal(c, r, "fancy indexing does not work correctly")
 
     def test04(self):
@@ -1401,15 +1469,15 @@ class evalTest(MayBeDiskTest):
     vm = "python"
 
     def setUp(self):
-        self.prev_vm = bcolz.defaults.eval_vm
+        self.prev_vm = bcolz.defaults.vm
         if bcolz.numexpr_here:
-            bcolz.defaults.eval_vm = self.vm
+            bcolz.defaults.vm = self.vm
         else:
-            bcolz.defaults.eval_vm = "python"
+            bcolz.defaults.vm = "python"
         MayBeDiskTest.setUp(self)
 
     def tearDown(self):
-        bcolz.defaults.eval_vm = self.prev_vm
+        bcolz.defaults.vm = self.prev_vm
         MayBeDiskTest.tearDown(self)
 
     def test00(self):
@@ -1506,12 +1574,9 @@ class evalTest(MayBeDiskTest):
     def test08(self):
         """Testing eval() via expression with lists (raise ValueError)"""
         a, b = range(int(self.N)), range(int(self.N))
-        depth = 3
-        if sys.version_info >= (3, 0):
-            depth += 1  # curiously enough, Python 3 needs one level more
-        self.assertRaises(ValueError, bcolz.eval, "a*3", depth=depth,
+        self.assertRaises(ValueError, bcolz.eval, "a*3", user_dict={'a':a,'b':b},
                           rootdir=self.rootdir)
-        self.assertRaises(ValueError, bcolz.eval, "b*3", depth=depth,
+        self.assertRaises(ValueError, bcolz.eval, "b*3", user_dict={'a':a,'b':b},
                           rootdir=self.rootdir)
 
     def test09(self):
@@ -1540,12 +1605,14 @@ class evalTest(MayBeDiskTest):
         c, d = bcolz.carray(a, rootdir=self.rootdir), bcolz.carray(b)
         if self.vm == "python":
             cr = bcolz.eval("np.sin(c) + 2 * np.log(d) - 3")
+        elif self.vm == "dask":
+            cr = bcolz.eval("da.sin(c) + 2 * da.log(d) - 3")
         else:
             cr = bcolz.eval("sin(c) + 2 * log(d) - 3")
         nr = np.sin(a) + 2 * np.log(b) - 3
         # print "bcolz.eval ->", cr
         # print "numpy   ->", nr
-        assert_array_equal(cr[:], nr, "eval does not work correctly")
+        assert_allclose(cr[:], nr, err_msg="eval does not work correctly")
 
     def test12(self):
         """Testing eval() with `out_flavor` == 'numpy'"""
@@ -1558,45 +1625,92 @@ class evalTest(MayBeDiskTest):
         self.assertTrue(type(cr) == np.ndarray)
         assert_array_equal(cr, nr, "eval does not work correctly")
 
+    def test13(self):
+        """Testing eval() with columnar [shape = (n, 1)] arrays"""
+        a = bcolz.ones((self.N, 1))
+        b = bcolz.zeros(a.shape)
+        b = bcolz.eval('a + b')
+        self.assertEqual(b.sum(), self.N)
 
-class evalSmall(evalTest):
+class evalSmall(evalTest, TestCase):
     N = 10
 
 
-class evalDiskSmall(evalTest):
+class evalDiskSmall(evalTest, TestCase):
     N = 10
     disk = True
 
 
-class evalBig(evalTest):
+class evalBig(evalTest, TestCase):
     N = 1e4
 
 
-class evalDiskBig(evalTest):
+class evalDiskBig(evalTest, TestCase):
     N = 1e4
     disk = True
 
 
-class evalSmallNE(evalTest):
+@skipUnless(bcolz.numexpr_here, 'Needs numexpr')
+class evalSmallNE(evalTest, TestCase):
     N = 10
     vm = "numexpr"
 
 
-class evalDiskSmallNE(evalTest):
+@skipUnless(bcolz.numexpr_here, 'Needs numexpr')
+class evalDiskSmallNE(evalTest, TestCase):
     N = 10
     vm = "numexpr"
     disk = True
 
 
-class evalBigNE(evalTest):
+@skipUnless(bcolz.numexpr_here, 'Needs numexpr')
+class evalBigNE(evalTest, TestCase):
     N = 1e4
     vm = "numexpr"
 
 
-class evalDiskBigNE(evalTest):
+@skipUnless(bcolz.numexpr_here, 'Needs numexpr')
+class evalDiskBigNE(evalTest, TestCase):
     N = 1e4
     vm = "numexpr"
     disk = True
+
+
+@skipUnless(bcolz.numexpr_here and common.heavy, "Needs numexpr and --heavy")
+class evalVeryBigNE(evalTest, TestCase):
+    N = int(1e7)
+    vm = "numexpr"
+
+@skipUnless(bcolz.dask_here, 'Needs dask')
+class evalSmallDSK(evalTest, TestCase):
+    N = 10
+    vm = "dask"
+
+
+@skipUnless(bcolz.dask_here, 'Needs dask')
+class evalDiskSmallDSK(evalTest, TestCase):
+    N = 10
+    vm = "dask"
+    disk = True
+
+
+@skipUnless(bcolz.dask_here, 'Needs dask')
+class evalBigDSK(evalTest, TestCase):
+    N = 1e4
+    vm = "dask"
+
+
+@skipUnless(bcolz.dask_here, 'Needs dask')
+class evalDiskBigDSK(evalTest, TestCase):
+    N = 1e4
+    vm = "dask"
+    disk = True
+
+
+@skipUnless(bcolz.dask_here and common.heavy, "Needs dask and --heavy")
+class evalVeryBigDSK(evalTest, TestCase):
+    N = int(1e7)
+    vm = "dask"
 
 
 class computeMethodsTest(TestCase):
@@ -2022,7 +2136,8 @@ class bloscCompressorsTest(MayBeDiskTest, TestCase):
 
     def tearDown(self):
         # Restore defaults
-        bcolz.cparams.setdefaults(clevel=5, shuffle=True, cname='blosclz')
+        bcolz.cparams.setdefaults(clevel=5, shuffle=bcolz.SHUFFLE,
+                                  cname='blosclz', quantize=0)
         MayBeDiskTest.tearDown(self)
 
     def test00(self):
@@ -2070,7 +2185,118 @@ class bloscCompressorsTest(MayBeDiskTest, TestCase):
         # print "\nsize b uncompressed-->", a.size * a.dtype.itemsize
         for cname in cnames:
             bcolz.defaults.cparams = {
-                'clevel': 9, 'shuffle': True, 'cname': cname}
+                'clevel': 9, 'shuffle': bcolz.SHUFFLE, 'cname': cname,
+                'quantize': 0}
+            b = bcolz.carray(a, rootdir=self.rootdir)
+            # print "size b compressed  -->", b.cbytes, "with '%s'"%cname
+            self.assertTrue(sys.getsizeof(b) < b.nbytes,
+                            "carray does not seem to compress at all")
+            assert_array_equal(a, b[:], "Arrays are not equal")
+            # Remove the array on disk before trying with the next one
+            if self.disk:
+                common.remove_tree(self.rootdir)
+
+    def test02a(self):
+        """Testing quantize filter on big arrays (float64)"""
+        np.random.seed(10)
+        a = np.cumsum(np.random.random_sample(100*1000)-0.5)    # random walk
+        if common.verbose:
+            print("Checking quantize filter")
+        # print "\nsize b uncompressed-->", a.size * a.dtype.itemsize
+        cparams = bcolz.cparams(quantize=0)
+        b = bcolz.carray(a, cparams=cparams, rootdir=self.rootdir)
+        b_cbytes = b.cbytes
+        assert_array_equal(a, b[:], "Arrays are not equal")
+        # print "size b compressed  -->", b_cbytes
+        # Remove the array on disk before trying with the next one
+        if self.disk:
+            common.remove_tree(self.rootdir)
+        cparams = bcolz.cparams(quantize=3)
+        c = bcolz.carray(a, cparams=cparams, rootdir=self.rootdir)
+        # print "size c compressed  -->", c.cbytes
+        self.assertTrue(c.cbytes < 0.7 * b_cbytes,
+                        "quantize does not seem to improve compression "
+                        "significantly")
+        assert_array_almost_equal(a, c[:], 3, "Arrays are not equal")
+        # Remove the array on disk before trying with the next one
+        if self.disk:
+            common.remove_tree(self.rootdir)
+
+    def test02b(self):
+        """Testing quantize filter on int arrays"""
+        a = np.arange(100*1000)
+        if common.verbose:
+            print("Checking quantize filter on ints")
+        cparams = bcolz.cparams(quantize=3)
+        self.assertRaises(TypeError, bcolz.carray, a, cparams=cparams,
+                          rootdir=self.rootdir)
+        # Remove the array on disk before trying with the next one
+        if self.disk:
+            common.remove_tree(self.rootdir)
+
+class compressorsMemoryTest(bloscCompressorsTest, TestCase):
+    disk = False
+
+
+class compressorsDiskTest(bloscCompressorsTest, TestCase):
+    disk = True
+
+
+class bloscFiltersTest(MayBeDiskTest, TestCase):
+
+    def tearDown(self):
+        # Restore defaults
+        bcolz.cparams.setdefaults(clevel=5, shuffle=bcolz.SHUFFLE,
+                                  cname='blosclz')
+        MayBeDiskTest.tearDown(self)
+
+    def test00(self):
+        """Testing all available filters in small arrays"""
+        a = np.arange(20)
+        filters = bcolz.filters.keys()
+        if common.verbose:
+            print("Checking filters:", filters)
+        # print "\nsize b uncompressed-->", a.size * a.dtype.itemsize
+        for filter_ in filters:
+            b = bcolz.carray(a, rootdir=self.rootdir,
+                             cparams=bcolz.cparams(clevel=9, shuffle=filter_))
+            # print "size b compressed  -->", b.cbytes, "with '%s'"%cname
+            self.assertTrue(sys.getsizeof(b) > b.nbytes,
+                            "compression does not seem to have any overhead")
+            assert_array_equal(a, b[:], "Arrays are not equal")
+            # Remove the array on disk before trying with the next one
+            if self.disk:
+                common.remove_tree(self.rootdir)
+
+    def test01a(self):
+        """Testing all available filters in big arrays (setdefaults)"""
+        a = np.arange(1e5)
+        filters = bcolz.filters.keys()
+        if common.verbose:
+            print("Checking compressors:", cnames)
+        # print "\nsize b uncompressed-->", a.size * a.dtype.itemsize
+        for filter_ in filters:
+            bcolz.cparams.setdefaults(clevel=9, shuffle=filter_)
+            b = bcolz.carray(a, rootdir=self.rootdir)
+            # print "size b compressed  -->", b.cbytes, "with '%s'"%cname
+            self.assertTrue(sys.getsizeof(b) < b.nbytes,
+                            "carray does not seem to compress at all")
+            assert_array_equal(a, b[:], "Arrays are not equal")
+            # Remove the array on disk before trying with the next one
+            if self.disk:
+                common.remove_tree(self.rootdir)
+
+    def test01b(self):
+        """Testing all available filters in big arrays (bcolz.defaults)"""
+        a = np.arange(1e5)
+        filters = bcolz.filters.keys()
+        if common.verbose:
+            print("Checking compressors:", cnames)
+        # print "\nsize b uncompressed-->", a.size * a.dtype.itemsize
+        for filter_ in filters:
+            bcolz.defaults.cparams = {
+                'clevel': 9, 'shuffle': filter_, 'cname': "blosclz",
+                'quantize': 0}
             b = bcolz.carray(a, rootdir=self.rootdir)
             # print "size b compressed  -->", b.cbytes, "with '%s'"%cname
             self.assertTrue(sys.getsizeof(b) < b.nbytes,
@@ -2081,14 +2307,15 @@ class bloscCompressorsTest(MayBeDiskTest, TestCase):
                 common.remove_tree(self.rootdir)
         # Restore defaults
         bcolz.defaults.cparams = {
-            'clevel': 5, 'shuffle': True, 'cname': 'blosclz'}
+            'clevel': 5, 'shuffle': bcolz.SHUFFLE, 'cname': 'blosclz',
+            'quantize': 0}
 
 
-class compressorsMemoryTest(bloscCompressorsTest, TestCase):
+class filtersMemoryTest(bloscFiltersTest, TestCase):
     disk = False
 
 
-class compressorsDiskTest(bloscCompressorsTest, TestCase):
+class filtersDiskTest(bloscFiltersTest, TestCase):
     disk = True
 
 
@@ -2099,6 +2326,8 @@ class reprTest(TestCase):
         result = repr(ct)
         self.assertTrue("['2010-01-01' '2010-01-02']" in result)
 
+    @unittest.skipIf(np.__version__ < LooseVersion("1.11"),
+                     "bcolz adapted to NumPy 1.11 (naive) TZ repr")
     def test_datetime_carray_nanos(self):
         x = ['2014-12-29T17:57:59.000000123',
              '2014-12-29T17:57:59.000000456']
@@ -2135,8 +2364,9 @@ class reprDiskTest(MayBeDiskTest,TestCase):
     def _create_expected(self, mode):
         expected = textwrap.dedent("""
                    carray((0,), float64)
-                     nbytes: 0; cbytes: 16.00 KB; ratio: 0.00
-                     cparams := cparams(clevel=5, shuffle=True, cname='blosclz')
+                     nbytes := 0; cbytes := 16.00 KB; ratio: 0.00
+                     cparams := cparams(clevel=5, shuffle=1, cname='blosclz', quantize=0)
+                     chunklen := 2048; chunksize: 16384; blocksize: 0
                      rootdir := '%s'
                      mode    := '%s'
                    []
@@ -2159,6 +2389,7 @@ class reprDiskTest(MayBeDiskTest,TestCase):
         y = carray(rootdir=self.rootdir)
         expected = self._create_expected('a')
         self.assertEqual(expected, repr(y))
+
 
 class chunksIterTest(MayBeDiskTest):
     def test00(self):
@@ -2196,6 +2427,148 @@ class ContextManagerTest(MayBeDiskTest, TestCase):
         received = np.array(carray(rootdir=self.rootdir))
         expected = np.array([1])
         assert_array_equal(expected, received)
+
+    def test_with_read_only(self):
+        x = bcolz.arange(5, rootdir=self.rootdir, mode="w")
+        x.flush()
+        sx = sum(i for i in x)
+
+        with bcolz.open(self.rootdir, mode='r') as xreadonly:
+            sxreadonly = sum(i for i in xreadonly)
+        self.assertEquals(sx, sxreadonly)
+
+
+class nleftoversTest(TestCase):
+
+    def test_empty(self):
+        a = carray([])
+        self.assertEquals(0, a.nleftover)
+
+    def test_one(self):
+        a = carray([1])
+        self.assertEqual(1, a.nleftover)
+
+    def test_beyond_one(self):
+        a = carray(np.zeros(2049), chunklen=2048)
+        self.assertEqual(1, a.nleftover)
+
+
+class LeftoverTest(MayBeDiskTest):
+
+    def test_leftover_ptr(self):
+        typesize = 8
+        items = 7
+        a = carray([i for i in range(items)], dtype='i8', rootdir=self.rootdir)
+        for i in range(items):
+            out = ctypes.c_int64.from_address(a.leftover_ptr + (i * typesize))
+            self.assertEqual(i, out.value)
+
+    def test_leftover_ptr_after_chunks(self):
+        typesize = 4
+        items = 108
+        chunklen = 100
+        a = carray([i for i in range(items)], chunklen=chunklen, dtype='i4',
+                   rootdir=self.rootdir)
+        for i in range(items % chunklen):
+            out = ctypes.c_int32.from_address(a.leftover_ptr + (i * typesize))
+            self.assertEqual(chunklen + i, out.value)
+
+    def test_leftover_array(self):
+        items = 7
+        a = carray([i for i in range(items)], dtype='i4', rootdir=self.rootdir)
+        reference = np.array([0, 1, 2, 3, 4, 5, 6], dtype='int32')
+        out = a.leftover_array[:items]
+        assert_array_equal(reference, out)
+
+    def test_leftover_bytes(self):
+        typesize = 8
+        items = 9
+        a = carray([i for i in range(items)], dtype='i8', rootdir=self.rootdir)
+        self.assertEqual(a.leftover_bytes, items * typesize)
+
+    def test_leftover_elements(self):
+        items = 9
+        a = carray([i for i in range(items)], dtype='i8', rootdir=self.rootdir)
+        self.assertEqual(a.leftover_elements, items)
+
+
+class LeftoverMemoryTest(LeftoverTest, TestCase):
+    disk = False
+
+
+class LeftoverDiskTest(LeftoverTest, TestCase):
+    disk = True
+
+    def test_leftover_ptr_create_flush_open(self):
+        typesize = 8
+        items = 120
+        chunklen = 50
+        n_leftovers = items % chunklen
+        n_chunks = items // chunklen
+
+        a = carray([i for i in range(items)], chunklen=chunklen, dtype='i8',
+                   rootdir=self.rootdir)
+        a.flush()
+
+        b = carray(rootdir=self.rootdir)
+        for i in range(n_leftovers):
+            out = ctypes.c_int32.from_address(b.leftover_ptr + (i * typesize))
+            self.assertEqual((n_chunks * chunklen) + i, out.value)
+
+    def test_leftover_ptr_with_statement_create_open(self):
+        typesize = 8
+        items = 120
+        chunklen = 50
+        n_leftovers = items % chunklen
+        n_chunks = items // chunklen
+
+        ca = carray([], chunklen=chunklen, dtype='i8', rootdir=self.rootdir)
+        with ca as a:
+            for i in range(items):
+                a.append(i)
+
+        b = carray(rootdir=self.rootdir)
+        for i in range(n_leftovers):
+            out = ctypes.c_int32.from_address(b.leftover_ptr + (i * typesize))
+            self.assertEqual((n_chunks * chunklen) + i, out.value)
+
+    def test_repr_of_empty_object_array(self):
+        assert 'ratio: nan' in repr(carray(np.array([], dtype=object)))
+
+
+class MagicNumbers(MayBeDiskTest):
+
+    def test_type_i4(self):
+        N = 2**16
+        ca = carray([i for i in range(N)], dtype='i4', rootdir=self.rootdir)
+
+        for i in range(len(ca)):
+            v = ca[i]
+            self.assertTrue(isinstance(v, _inttypes))
+
+    def test_type_i8(self):
+        N = 2**15
+        ca = carray([i for i in range(N)], dtype='i8', rootdir=self.rootdir)
+
+        for i in range(len(ca)):
+            v = ca[i]
+            self.assertTrue(isinstance(v, _inttypes))
+
+    def test_type_f8(self):
+        N = 2**15
+        ca = carray([i for i in range(N)], dtype='f8', rootdir=self.rootdir)
+
+        for i in range(len(ca)):
+            v = ca[i]
+            self.assertTrue(isinstance(v, float))
+
+
+class MagicNumbersMemoryTest(MagicNumbers, TestCase):
+    disk = False
+
+
+class MagicNumbersDiskTest(MagicNumbers, TestCase):
+    disk = True
 
 
 if __name__ == '__main__':

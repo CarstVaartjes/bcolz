@@ -16,12 +16,15 @@ __docformat__ = 'restructuredtext'
 # adapted by Francesc Alted 2012-8-18 for bcolz
 
 import sys
+from distutils.version import LooseVersion
 
+import numpy
 from numpy.core import numerictypes as _nt
 from numpy import maximum, minimum, absolute, not_equal, isnan, isinf
 from numpy.core.multiarray import format_longfloat
 from numpy.core.fromnumeric import ravel
 from .py2help import xrange
+
 
 try:
     from numpy.core.multiarray import datetime_as_string, datetime_data
@@ -115,6 +118,7 @@ def set_printoptions(precision=None, threshold=None, edgeitems=None,
     --------
     Floating point precision can be set:
 
+    >>> import numpy as np
     >>> np.set_printoptions(precision=4)
     >>> print(np.array([1.123456789]))
     [ 1.1235]
@@ -431,6 +435,7 @@ def array2string(a, max_line_width=None, precision=None,
 
     Examples
     --------
+    >>> import numpy as np
     >>> x = np.array([1e-16,1,2,3])
     >>> print(np.array2string(x, precision=2, separator=',',
     ...                       suppress_small=True))
@@ -748,8 +753,7 @@ class ComplexFormat(object):
 
 
 class DatetimeFormat(object):
-    def __init__(self, x, unit=None,
-                 timezone=None, casting='same_kind'):
+    def __init__(self, x, unit=None, timezone=None, casting='same_kind'):
         # Get the unit from the dtype
         if unit is None:
             if x.dtype.kind == 'M':
@@ -757,15 +761,13 @@ class DatetimeFormat(object):
             else:
                 unit = 's'
 
-        # If timezone is default, make it 'local' or 'UTC' based on the unit
-        if timezone is None:
-            # Date units -> UTC, time units -> local
-            if unit in ('Y', 'M', 'W', 'D'):
-                self.timezone = 'UTC'
-            else:
-                self.timezone = 'local'
+        # If timezone is default, make it 'naive' or 'UTC' depending on
+        # the numpy version
+        if timezone is None and numpy.__version__ >= LooseVersion("1.11"):
+            timezone = "naive"
         else:
-            self.timezone = timezone
+            timezone = "UTC"
+        self.timezone = timezone
         self.unit = unit
         self.casting = casting
 

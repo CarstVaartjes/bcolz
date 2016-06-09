@@ -1,11 +1,29 @@
-=======================
-Announcing bcolz 0.10.0
-=======================
+======================
+Announcing bcolz 1.0.1
+======================
 
 What's new
 ==========
 
-#XXX version-specific blurb XXX#
+ #XXX version-specific blurb XXX#
+
+For a more detailed change log, see:
+
+https://github.com/Blosc/bcolz/blob/master/RELEASE_NOTES.rst
+
+For some comparison between bcolz and other compressed data containers,
+see:
+
+https://github.com/FrancescAlted/DataContainersTutorials
+
+specially chapters 3 (in-memory containers) and 4 (on-disk containers).
+
+Also, if it happens that you are in Madrid during this weekend, you can
+drop by my tutorial and talk:
+
+http://pydata.org/madrid2016/schedule/
+
+See you!
 
 
 What it is
@@ -37,9 +55,8 @@ promise of accelerating memory I/O, at least for some real scenarios:
 
 http://nbviewer.ipython.org/github/Blosc/movielens-bench/blob/master/querying-ep14.ipynb#Plots
 
-Other users of bcolz are Visualfabriq (http://www.visualfabriq.com/) the
-Blaze project (http://blaze.pydata.org/), Quantopian
-(https://www.quantopian.com/) and Scikit-Allel
+Other users of bcolz are Visualfabriq (http://www.visualfabriq.com/),
+Quantopian (https://www.quantopian.com/) and Scikit-Allel
 (https://github.com/cggh/scikit-allel) which you can read more about by
 pointing your browser at the links below.
 
@@ -47,12 +64,6 @@ pointing your browser at the links below.
 
   * *bquery*, A query and aggregation framework for Bcolz:
   * https://github.com/visualfabriq/bquery
-
-* Blaze:
-
-  * Notebooks showing Blaze + Pandas + BColz interaction: 
-  * http://nbviewer.ipython.org/url/blaze.pydata.org/notebooks/timings-csv.ipynb
-  * http://nbviewer.ipython.org/url/blaze.pydata.org/notebooks/timings-bcolz.ipynb
 
 * Quantopian:
 
@@ -62,14 +73,7 @@ pointing your browser at the links below.
 * Scikit-Allel
 
   * Provides an alternative backend to work with compressed arrays
-  * https://scikit-allel.readthedocs.org/en/latest/bcolz.html
-
-Installing
-==========
-
-bcolz is in the PyPI repository, so installing it is easy::
-
-    $ pip install -U bcolz
+  * https://scikit-allel.readthedocs.org/en/latest/model/bcolz.html
 
 
 Resources

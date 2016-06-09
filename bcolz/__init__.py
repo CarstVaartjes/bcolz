@@ -2,7 +2,7 @@
 #
 #       License: BSD
 #       Created: August 05, 2010
-#       Author:  Francesc Alted - francesc@blosc.io
+#       Author:  Francesc Alted - francesc@blosc.org
 #
 ########################################################################
 
@@ -18,16 +18,38 @@ The compression process is carried out internally by Blosc,
 a high-performance compressor that is optimized for binary data.
 
 """
+from distutils.version import LooseVersion
 
-min_numexpr_version = '1.4.1'  # the minimum version of Numexpr needed
+# Filters
+NOSHUFFLE = 0
+SHUFFLE = 1
+BITSHUFFLE = 2
+
+# Translation of filters to strings
+filters = {NOSHUFFLE: "noshuffle",
+           SHUFFLE: "shuffle",
+           BITSHUFFLE: "bitshuffle"}
+
+min_numexpr_version = '2.5.2'  # the minimum version of Numexpr needed
 numexpr_here = False
 try:
     import numexpr
 except ImportError:
     pass
 else:
-    if numexpr.__version__ >= min_numexpr_version:
+    if numexpr.__version__ >= LooseVersion(min_numexpr_version):
         numexpr_here = True
+
+# Check for dask (as another virtual machine for chunked eval)
+min_dask_version = '0.9.0'  # the minimum version of Numexpr needed
+dask_here = False
+try:
+    import dask
+except ImportError:
+    pass
+else:
+    if dask.__version__ >= LooseVersion(min_dask_version):
+        dask_here = True
 
 # Check for pandas (for data container conversion purposes)
 pandas_here = False
@@ -47,7 +69,6 @@ except ImportError:
 else:
     tables_here = True
 
-
 # Print array functions (imported from NumPy)
 from bcolz.arrayprint import (
     array2string, set_printoptions, get_printoptions )
@@ -63,7 +84,8 @@ from bcolz.toplevel import (
     iterblocks, cparams, walk)
 from bcolz.chunked_eval import eval
 from bcolz.defaults import defaults
-from bcolz.version import __version__
+from bcolz.version import version as __version__
+
 try:
     from bcolz.tests import test
 except ImportError:

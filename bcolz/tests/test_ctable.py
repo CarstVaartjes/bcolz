@@ -2,7 +2,7 @@
 #
 #       License: BSD
 #       Created: September 1, 2010
-#       Author:  Francesc Alted - francesc@blosc.io
+#       Author:  Francesc Alted - francesc@blosc.org
 #
 ########################################################################
 
@@ -14,12 +14,16 @@ import tempfile
 
 import numpy as np
 from numpy.testing import assert_array_equal, assert_allclose
-from bcolz.tests.common import MayBeDiskTest, TestCase, unittest, skipUnless
+from bcolz.tests.common import (
+        MayBeDiskTest, TestCase, unittest, skipUnless, SkipTest)
 import bcolz
 from bcolz.py2help import xrange, PY2
+from bcolz.py2help_tests import Mock
 import pickle
-import os
-from mock import Mock
+
+
+# Global variable for frame depth testing
+GVAR = 1000
 
 
 class createTest(MayBeDiskTest):
@@ -108,6 +112,72 @@ class createTest(MayBeDiskTest):
         t = bcolz.ctable(([1], [2]), (u'f0', u'f1'), rootdir=self.rootdir)
         # this should not raise an error
         t[u'f0'].rootdir
+
+    def test06a(self):
+        """Test create empty ctable"""
+        N = 0
+        dtype = "i4,i8,f8"
+        ra = np.zeros(N, dtype=dtype)
+        ct = bcolz.zeros(N, dtype=dtype, rootdir=self.rootdir)
+        assert_array_equal(ct[:], ra, "ctable values are not correct")
+
+    def test06b(self):
+        """Test create empty ctable and assing names to their columns"""
+        N = 0
+        dtype = np.dtype(
+            [('Alice', np.int16), ('Bob', np.int8), ('Charlie', np.float)])
+        ra = np.zeros(N, dtype=dtype)
+        ct = bcolz.zeros(N, dtype=dtype, rootdir=self.rootdir)
+        self.assertEquals(ct.names, ['Alice', 'Bob', 'Charlie'])
+        assert_array_equal(ct[:], ra, "ctable values are not correct")
+
+    def test06c(self):
+        """Test create empty ctable and set some cparams"""
+        N = 0
+        dtype = "i4,i8,f8"
+        ra = np.zeros(N, dtype=dtype)
+        cparams = bcolz.cparams(clevel=9, shuffle=bcolz.NOSHUFFLE)
+        ct = bcolz.zeros(N, dtype=dtype, cparams=cparams, rootdir=self.rootdir)
+        assert_array_equal(ct[:], ra, "ctable values are not correct")
+        self.assertEqual(cparams, ct.cparams)
+
+    def test06d(self):
+        """Test create empty ctable and set expectedlen"""
+        N = 0
+        expectedlen = int(1e7)
+        ct = bcolz.zeros(0, dtype="i4,i8,f8", expectedlen=expectedlen)
+        self.assertEqual(131072, ct['f0'].chunklen)
+        self.assertEqual(65536, ct['f1'].chunklen)
+        self.assertEqual(65536, ct['f2'].chunklen)
+
+    def test07a(self):
+        """Test create ctable full of zeros"""
+        N = 10000
+        dtype = "i4,i8,f4"
+        ra = np.zeros(N, dtype=dtype)
+        ct = bcolz.zeros(N, dtype=dtype, rootdir=self.rootdir)
+        assert_array_equal(ct[:], ra, "ctable values are not correct")
+
+    def test07b(self):
+        """Test create ctable full of zeros and assign names to their columns"""
+        N = 10000
+        dtype = np.dtype(
+            [('Alice', np.int16), ('Bob', np.int8), ('Charlie', np.float)])
+        ra = np.zeros(N, dtype=dtype)
+        ct = bcolz.zeros(N, dtype=dtype, rootdir=self.rootdir)
+        self.assertEquals(ct.names, ['Alice', 'Bob', 'Charlie'])
+        assert_array_equal(ct[:], ra, "ctable values are not correct")
+
+    def test07c(self):
+        """Test create ctable full of zeros and set some cparams"""
+        N = 10000
+        dtype = "i4,i8,f8"
+        ra = np.zeros(N, dtype=dtype)
+        cparams = bcolz.cparams(clevel=9, shuffle=bcolz.NOSHUFFLE)
+        ct = bcolz.zeros(N, dtype=dtype, cparams=cparams, rootdir=self.rootdir)
+        assert_array_equal(ct[:], ra, "ctable values are not correct")
+        self.assertEqual(cparams, ct.cparams)
+
 
 
 class createMemoryTest(createTest, TestCase):
@@ -222,6 +292,21 @@ class persistentTest(MayBeDiskTest, TestCase):
         bcolz.ctable(rootdir=self.rootdir, mode='a')
         ra = np.rec.fromarrays([a[:], b[:]]).view(np.ndarray)
         assert_array_equal(t[:], ra, "ctable values are not correct")
+
+    def test01d(self):
+        """Testing ctable opening in "r" mode with nonexistent directory"""
+        tempdir = tempfile.mkdtemp(prefix='bcolz-test01d')
+        non_existent_root = os.path.join(tempdir, 'not/a/real/path')
+        expected_message = (
+            "Disk-based ctable opened with `r`ead mode "
+            "yet `rootdir='{rootdir}'` does not exist".format(
+                rootdir=non_existent_root,
+            )
+        )
+
+        with self.assertRaises(KeyError) as ctx:
+            bcolz.ctable(rootdir=non_existent_root, mode='r')
+        self.assertEqual(ctx.exception.args[0], expected_message)
 
 
 class add_del_colTest(MayBeDiskTest):
@@ -371,6 +456,28 @@ class add_del_colTest(MayBeDiskTest):
         # print "ra[:]", ra[:]
         assert_array_equal(t[:], ra, "ctable values are not correct")
 
+    def test09a(self):
+        """Testing overwriting an existing column (using __setitem__)"""
+        N = 10
+        ra = np.fromiter(((i, i * 3, i * 2.)
+                          for i in xrange(N)), dtype='i4,i8,f8')
+        t = bcolz.ctable(ra, rootdir=self.rootdir)
+        t['f1'] = np.arange(N, dtype='i8')
+        ra = np.fromiter(((i, i, i * 2.) for i in xrange(N)),
+                          dtype='i4,i8,f8')
+        ra.dtype.names = ('f0', 'f1', 'f2')
+        # print "t->", `t`
+        # print "ra[:]", ra[:]
+        assert_array_equal(t[:], ra, "ctable values are not correct")
+
+    def test09b(self):
+        """Testing overwriting an existing column (different length)"""
+        N = 10
+        ra = np.fromiter(((i, i * 3, i * 2.)
+                          for i in xrange(N)), dtype='i4,i8,f8')
+        t = bcolz.ctable(ra, rootdir=self.rootdir)
+        self.assertRaises(ValueError, t.__setitem__,
+                          'f1', np.arange(N + 1, dtype='i8'))
 
 class add_del_colMemoryTest(add_del_colTest, TestCase):
     disk = False
@@ -527,6 +634,33 @@ class getitemTest(MayBeDiskTest):
         assert_array_equal(t[:], ra[:],
                            "ctable values are not correct")
 
+    def test_unicode_colname(self):
+        """Testing __getitem__ with a unicode column name"""
+        N = 10
+        ra = np.fromiter(((i, i * 2.) for i in xrange(N)), dtype='i4,f8')
+        t = bcolz.ctable(ra, rootdir=self.rootdir)
+        colname = u"f1"
+        # print "t->", `t[colname]`
+        # print "ra->", ra[colname]
+        assert_array_equal(t[colname][:], ra[colname],
+                           "ctable values are not correct")                          
+
+    def test_multi_unicode_colnames(self):
+        """Testing __getitem__ with a list of unicode column names"""
+        N = 10
+        ra = np.fromiter(((i, i * 2., i * 3)
+                          for i in xrange(N)), dtype='i4,f8,i8')
+        t = bcolz.ctable(ra, rootdir=self.rootdir)
+        colnames = [u"f0", u"f2"]
+        # For some version of NumPy (> 1.7) I cannot make use of
+        # ra[colnames]   :-/
+        ra2 = np.fromiter(((i, i * 3) for i in xrange(N)), dtype='i4,i8')
+        ra2.dtype.names = ('f0', 'f2')
+        # print "t->", `t[colnames]`
+        # print "ra2->", ra2
+        assert_array_equal(t[colnames][:], ra2,
+                           "ctable values are not correct")
+
 
 class getitemMemoryTest(getitemTest, TestCase):
     disk = False
@@ -672,6 +806,27 @@ class appendTest(MayBeDiskTest):
         ra = np.fromiter(((i, i * 2.) for i in xrange(N + 10)), dtype='i4,f8')
         assert_array_equal(t[:], ra, "ctable values are not correct")
 
+    def test05(self):
+        """Testing append() with void types"""
+        N = 10
+        ra = np.fromiter(((i, i * 2.) for i in xrange(N)), dtype='i4,f8')
+        t = bcolz.ctable(ra[:-1], rootdir=self.rootdir)
+        t.append(ra[-1])
+        assert_array_equal(t[:], ra, "ctable values are not correct")
+
+    def test06(self):
+        """Extracting rows from table with np.object column"""
+        N = 4
+        dtype = np.dtype([("a", np.object), ("b", np.uint8), ("c", np.int32), 
+            ("d", np.float32) ])
+        with bcolz.ctable(np.empty(0, dtype=dtype), rootdir=self.rootdir) as t:
+            for i in xrange(N):
+                t.append((str(i), i*2, i*4, i*8))
+            result = t[np.array([1, 0, 2])]
+            assert_array_equal(result[0], t[1])
+            assert_array_equal(result[1], t[0])
+            assert_array_equal(result[2], t[2])
+
 
 class appendMemoryTest(appendTest, TestCase):
     disk = False
@@ -808,7 +963,8 @@ class copyTest(MayBeDiskTest):
         ra = np.fromiter(((i, i ** 2.2) for i in xrange(N)), dtype='i4,f8')
         t = bcolz.ctable(ra)
         # print "t:", repr(t), t.rootdir
-        t2 = t.copy(cparams=bcolz.cparams(shuffle=False), rootdir=self.rootdir)
+        t2 = t.copy(cparams=bcolz.cparams(shuffle=bcolz.NOSHUFFLE),
+                    rootdir=self.rootdir)
         # print "cbytes in f1, f2:", t['f1'].cbytes, t2['f1'].cbytes
         self.assertTrue(t['f1'].cbytes < t2['f1'].cbytes, "clevel not changed")
 
@@ -860,15 +1016,17 @@ class evalTest(MayBeDiskTest):
     vm = "python"
 
     def setUp(self):
-        self.prev_vm = bcolz.defaults.eval_vm
-        if bcolz.numexpr_here:
-            bcolz.defaults.eval_vm = self.vm
+        self.prev_vm = bcolz.defaults.vm
+        if self.vm == "numexpr" and bcolz.numexpr_here:
+            bcolz.defaults.vm = "numexpr"
+        elif self.vm == "dask" and bcolz.dask_here:
+            bcolz.defaults.vm = "dask"
         else:
-            bcolz.defaults.eval_vm = "python"
+            bcolz.defaults.vm = "python"
         MayBeDiskTest.setUp(self)
 
     def tearDown(self):
-        bcolz.defaults.eval_vm = self.prev_vm
+        bcolz.defaults.vm = self.prev_vm
         MayBeDiskTest.tearDown(self)
 
     def test00a(self):
@@ -925,10 +1083,12 @@ class evalTest(MayBeDiskTest):
         ra = np.fromiter(((i, i * 2., i * 3)
                           for i in xrange(N)), dtype='i4,f8,i8')
         t = bcolz.ctable(ra, rootdir=self.rootdir)
-        if not bcolz.defaults.eval_vm == "numexpr":
-            # Populate the name space with functions from numpy
-            from numpy import sin  # noqa
-        ctr = t.eval("f0 * sin(f1)")
+        if bcolz.defaults.vm == "python":
+            ctr = t.eval("f0 * np.sin(f1)")
+        elif bcolz.defaults.vm == "dask":
+            ctr = t.eval("f0 * da.sin(f1)")
+        else:  # numexpr
+            ctr = t.eval("f0 * sin(f1)")
         rar = ra['f0'] * np.sin(ra['f1'])
         # print "ctable ->", ctr
         # print "numpy  ->", rar
@@ -999,6 +1159,15 @@ class eval_neDisk(evalTest, TestCase):
     disk = True
 
 
+class eval_dask(evalTest, TestCase):
+    vm = "dask"
+
+
+class eval_daskDisk(evalTest, TestCase):
+    vm = "dask"
+    disk = True
+
+
 class fancy_indexing_getitemTest(TestCase):
 
     def test00(self):
@@ -1045,7 +1214,7 @@ class fancy_indexing_getitemTest(TestCase):
                           for i in xrange(N)), dtype='i4,f8,i8')
         t = bcolz.ctable(ra)
         rt = t[[2.3, 5.6]]
-        rar = ra[[2.3, 5.6]]
+        rar = ra[[2, 5]]
         # print "rt->", rt
         # print "rar->", rar
         assert_array_equal(rt, rar, "ctable values are not correct")
@@ -1415,7 +1584,7 @@ class iterblocksTest(MayBeDiskTest):
         for block in bcolz.iterblocks(t, blen, blen - 1):
             l += len(block)
             # f8 is to small to hold the sum on 32 bit
-            s += block['f1'].sum(dtype='f16')
+            s += block['f1'].sum(dtype=np.longdouble)
         self.assertEqual(l, (N - (blen - 1)))
         self.assertEqual(s, (np.arange(blen - 1, N, dtype='f8') * 2).sum())
 
@@ -1654,6 +1823,19 @@ class whereTest(MayBeDiskTest):
         # print "rl->", rl
         self.assertTrue(rt == rl, "where not working correctly")
 
+    def test00d(self):
+        """Testing where() with a boolean array (vm different than default)"""
+        N = self.N
+        ra = np.fromiter(((i, i * 2., i * 3)
+                          for i in xrange(N)), dtype='i4,f8,i8')
+        t = bcolz.ctable(ra, rootdir=self.rootdir)
+        barr = t.eval('4+f1 > f2')
+        rt = [r.f0 for r in t.where(barr, vm="python")]
+        rl = [i for i in xrange(N) if 4 + i > i * 2]
+        # print "rt->", rt
+        # print "rl->", rl
+        self.assertTrue(rt == rl, "where not working correctly")
+
     def test01a(self):
         """Testing where() with an expression (all false values)"""
         N = self.N
@@ -1685,6 +1867,18 @@ class whereTest(MayBeDiskTest):
                           for i in xrange(N)), dtype='i4,f8,i8')
         t = bcolz.ctable(ra, rootdir=self.rootdir)
         rt = [r.f0 for r in t.where('4+f1 > f2')]
+        rl = [i for i in xrange(N) if 4 + i > i * 2]
+        # print "rt->", rt
+        # print "rl->", rl
+        self.assertTrue(rt == rl, "where not working correctly")
+
+    def test01d(self):
+        """Testing where() with an expression (vm different than default)"""
+        N = self.N
+        ra = np.fromiter(((i, i * 2., i * 3)
+                          for i in xrange(N)), dtype='i4,f8,i8')
+        t = bcolz.ctable(ra, rootdir=self.rootdir)
+        rt = [r.f0 for r in t.where('4+f1 > f2', vm="python")]
         rl = [i for i in xrange(N) if 4 + i > i * 2]
         # print "rt->", rt
         # print "rl->", rl
@@ -1827,6 +2021,19 @@ class whereTest(MayBeDiskTest):
         self.assertEqual([i for i in ai], [i.b for i in bi])
         self.assertEqual([i for i in ai], [i.b for i in bi])
 
+    def test11(self):
+        """Testing where() with local and global variables"""
+        N = self.N
+        lvar = GVAR
+        ra = np.fromiter(((i, i * 2., i * 3)
+                          for i in xrange(N)), dtype='i4,f8,i8')
+        t = bcolz.ctable(ra, rootdir=self.rootdir)
+        barr = t.eval('(f1 + lvar) > (f2 + GVAR)')
+        rt = [r.f0 for r in t.where(barr)]
+        rl = [i for i in xrange(N) if i > i * 2]
+        # print "rt->", rt
+        # print "rl->", rl
+        self.assertTrue(rt == rl, "where not working correctly")
 
 class where_smallTest(whereTest, TestCase):
     N = 10
@@ -1925,7 +2132,7 @@ class walkTest(MayBeDiskTest, TestCase):
         self.assertTrue(others == 0)
 
 
-class conversionTest(TestCase):
+class pandasConversionTest(TestCase):
 
     @skipUnless(bcolz.pandas_here, "pandas not here")
     def test00(self):
@@ -1939,8 +2146,35 @@ class conversionTest(TestCase):
         for key in ct.names:
             assert_allclose(ct2[key][:], ct[key][:])
 
-    @skipUnless(bcolz.tables_here, "PyTables not here")
+    @skipUnless(bcolz.pandas_here, "pandas not here")
     def test01(self):
+        """Testing roundtrips to a pandas dataframe (strings)"""
+        N = 1000
+        ra = np.fromiter(((i, i * 2., "%.10s" % (i * 3))
+                          for i in xrange(N)), dtype='i4,f8,S10')
+        ct = bcolz.ctable(ra)
+        df = ct.todataframe()
+        ct2 = bcolz.ctable.fromdataframe(df)
+        for i in range(N):
+            assert ct2['f2'][i] == ct['f2'][i]
+
+    @skipUnless(bcolz.pandas_here, "pandas not here")
+    def test02(self):
+        """Testing roundtrips to a pandas dataframe (unicode)"""
+        N = 1000
+        ra = np.fromiter(((i, i * 2., u"%.10s" % (i * 3))
+                          for i in xrange(N)), dtype='i4,f8,U10')
+        ct = bcolz.ctable(ra)
+        df = ct.todataframe()
+        ct2 = bcolz.ctable.fromdataframe(df)
+        for i in range(N):
+            assert ct2['f2'][i] == ct['f2'][i]
+
+
+class pytablesConversionTest(TestCase):
+
+    @skipUnless(bcolz.tables_here, "PyTables not here")
+    def test00(self):
         """Testing roundtrips to a HDF5 file"""
         N = 1000
         ra = np.fromiter(((i, i * 2., i * 3)
@@ -2124,23 +2358,38 @@ class FlushDiskTest(MayBeDiskTest, TestCase):
                          rootdir=self.rootdir, auto_flush=False)
         self.assertFalse(t.auto_flush)
 
+    def test_repr_after_appending(self):
+        data = np.array([('data1', 1), ('data2', 2), ('data3', 3)],
+                        dtype=[('a', 'object'), ('b', 'int64')])
+        t = bcolz.ctable(data[:0].copy())
+        t.append(data)
+        self.assertTrue(bool(repr(t)))
+
+    def test_slice_after_appending(self):
+        data = np.array([('data1', 1), ('data2', 2), ('data3', 3)],
+                        dtype=[('a', 'object'), ('b', 'int64')])
+        t = bcolz.ctable(data[:0].copy())
+        t.append(data)
+        self.assertTrue((t[:1] == data[:1]).all())
+
 
 class ContextManagerTest(MayBeDiskTest, TestCase):
     disk = True
 
     def test_with_statement_flushes(self):
 
-        with bcolz.ctable(np.empty(0, dtype="S2,i4,i8,f8"), rootdir=self.rootdir, mode="w") as x:
+        with bcolz.ctable(np.empty(0, dtype="S2,i4,i8,f8"),
+                          rootdir=self.rootdir, mode="w") as x:
             x.append(("a", 1, 2, 3.0))
             x.append(("b", 4, 5, 6.0))
 
         received = bcolz.ctable(rootdir=self.rootdir)[:]
-        expected = np.array([('a', 1, 2, 3.0), ('b', 4, 5, 6.0)],
-                            dtype=[('f0', 'S2'), ('f1', '<i4'), ('f2', '<i8'), ('f3', '<f8')])
+        expected = \
+            np.array([('a', 1, 2, 3.0), ('b', 4, 5, 6.0)],
+                     dtype=[('f0', 'S2'), ('f1', '<i4'),
+                            ('f2', '<i8'), ('f3', '<f8')])
 
         assert_array_equal(expected, received)
-
-
 
 
 if __name__ == '__main__':

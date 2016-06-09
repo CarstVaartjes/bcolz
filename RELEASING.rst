@@ -3,7 +3,7 @@ Releasing bcolz
 ===============
 
 :Author: Francesc Alted
-:Contact: faltet@blosc.io
+:Contact: francesc@blosc.org
 :Date: 2014-07-20
 
 
@@ -13,10 +13,31 @@ Preliminaries
 * Make sure that ``RELEASE_NOTES.rst`` and ``ANNOUNCE.rst`` are up to
   date with the latest news in the release.
 
-* Check that ``VERSION`` file contains the correct number.
+* Commit your changes::
 
-* Once a year: check that the copyright in ``LICENSES/BCOLZ.txt`` and
-  ``doc/conf.py``.
+    $ git commit -a -m"Getting ready for X.Y.Z final"
+
+* Once a year: check that the copyright year in ``LICENSES/BCOLZ.txt``
+  and in ``docs/conf.py`` is up to date.
+
+
+Tagging
+-------
+
+* Create a tag ``X.Y.Z`` from ``master``.  Use the next message::
+
+    $ git tag -a X.Y.Z -m "Tagging version X.Y.Z"
+
+  Note: For release candidates, just add a rcN suffix to tag ("X.Y.ZrcN").
+
+* Or, alternatively, make a signed tag (requires gpg correctly configured)::
+
+    $ git tag -s X.Y.Z -m "Tagging version X.Y.Z"
+
+* Push the tag to the Github repo::
+
+    $ git push --tags
+
 
 Testing
 -------
@@ -31,45 +52,16 @@ Testing
   Windows) and make sure that all tests passes.
 
 
-Updating the online documentation site
---------------------------------------
-
-.. note::
-
-    This instructions are currently out-of-date and are to be considered under
-    construction.
-
-* Go to the doc directory::
-
-  $ cd doc
-
-* Make sure that the ``version``/``release`` variables are updated in
-  ``conf.py``.
-
-* Make the html version of the docs::
-
-  $ rm -rf _build/html
-  $ make html
-
-* Make a backup and upload the files in the doc site (xodo)::
-
-  $ export UPSTREAM="/home/blosc/srv/www/bcolz.blosc.org"
-  $ ssh blosc@xodo.blosc.org "mv $UPSTREAM/docs/html $UPSTREAM/docs/html.bck"
-  $ scp -r _build/html blosc@xodo.blosc.org:$UPSTREAM/docs
-
-* Check that the new manual is accessible in http://bcolz.blosc.org
-
-* If everything is fine, remove the backup of the previous manual::
-
-  $ ssh blosc@xodo.blosc.org "rm -r $UPSTREAM/docs/html.bck"
-
-* Go up to the root directory for further proceeding with packaging::
-
-  $ cd ..
-
-
 Packaging
 ---------
+
+* Make sure that you are in a clean directory.  The best way is to
+  re-clone and re-build::
+
+  $ cd /tmp
+  $ git clone git@github.com:Blosc/bcolz.git
+  $ cd bcolz
+  $ python setup.py build_ext
 
 * Check that all Cython generated ``*.c`` files are present.
 
@@ -88,22 +80,6 @@ Uploading
     $ python setup.py sdist upload
 
 
-Tagging
--------
-
-* Create a tag ``X.Y.Z`` from ``master``.  Use the next message::
-
-    $ git tag -a vX.Y.Z -m "Tagging version X.Y.Z"
-
-* Or, alternatively, make a signed tag (requires gpg correctly configured)::
-
-    $ git tag -s vX.Y.Z -m "Tagging version X.Y.Z"
-
-* Push the tag to the Github repo (assuming ``origin`` is correct)::
-
-    $ git push origin vX.Y.Z
-
-
 Announcing
 ----------
 
@@ -111,22 +87,20 @@ Announcing
   python-announce lists.  Use the ``ANNOUNCE.rst`` file as skeleton
   (or possibly as the definitive version).
 
-* Tweet about the new release and enjoy!
+* Tweet about the new release and rejoice!
 
 
 Post-release actions
 --------------------
 
-* Edit ``VERSION`` in master to increment the version to the next
-  minor one (i.e. X.Y.Z --> X.Y.(Z+1).dev).
-
-* Also, update the ``version`` and ``release`` variables in doc/conf.py.
-
 * Create new headers for adding new features in ``RELEASE_NOTES.rst``
-  and empty the release-specific information in ``ANNOUNCE.rst`` and
-  add this place-holder instead:
+  and add this place-holder instead:
 
   #XXX version-specific blurb XXX#
+
+* Commit your changes with:
+
+  $ git commit -a -m"Post X.Y.Z release actions done"
 
 
 That's all folks!

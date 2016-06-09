@@ -1,22 +1,33 @@
 bcolz: columnar and compressed data containers
 ==============================================
 
+.. image:: https://badges.gitter.im/Blosc/bcolz.svg
+   :alt: Join the chat at https://gitter.im/Blosc/bcolz
+   :target: https://gitter.im/Blosc/bcolz?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge
+
 :Version: |version|
 :Travis CI: |travis|
 :Appveyor: |appveyor|
+:Coveralls: |coveralls|
 :And...: |powered|
 
-.. |version| image:: https://pypip.in/v/bcolz/badge.png
+.. |version| image:: https://img.shields.io/pypi/v/bcolz.png
         :target: https://pypi.python.org/pypi/bcolz
 
-.. |travis| image:: https://travis-ci.org/Blosc/bcolz.png?branch=master
+.. |travis| image:: https://img.shields.io/travis/Blosc/bcolz.png
         :target: https://travis-ci.org/Blosc/bcolz
 
-.. |appveyor| image:: https://ci.appveyor.com/api/projects/status/va0cathv8jskf5po/branch/master?svg=true
-        :target: https://ci.appveyor.com/project/esc/bcolz/branch/master
+.. |appveyor| image:: https://img.shields.io/appveyor/ci/FrancescAlted/bcolz.png
+        :target: https://ci.appveyor.com/project/FrancescAlted/bcolz/branch/master
 
 .. |powered| image:: http://b.repl.ca/v1/Powered--By-Blosc-blue.png
-        :target: https://blosc.org
+        :target: http://blosc.org
+
+.. |coveralls| image:: https://coveralls.io/repos/Blosc/bcolz/badge.png
+        :target: https://coveralls.io/r/Blosc/bcolz
+
+
+.. image:: docs/bcolz.png
 
 bcolz provides columnar, chunked data containers that can be
 compressed either in-memory and on-disk.  Column storage allows for
@@ -35,12 +46,13 @@ binary data (although it works with text data just fine too).
 
 bcolz can also use `numexpr <https://github.com/pydata/numexpr>`_
 internally (it does that by default if it detects numexpr installed)
-so as to accelerate many vector and query operations (although it can
-use pure NumPy for doing so too).  numexpr can optimize the memory
-usage and use multithreading for doing the computations, so it is
-blazing fast.  This, in combination with carray/ctable disk-based,
-compressed containers, can be used for performing out-of-core
-computations efficiently, but most importantly *transparently*.
+or `dask <https://github.com/dask/dask>`_ so as to accelerate many
+vector and query operations (although it can use pure NumPy for doing
+so too).  numexpr/dask can optimize the memory usage and use
+multithreading for doing the computations, so it is blazing fast.
+This, in combination with carray/ctable disk-based, compressed
+containers, can be used for performing out-of-core computations
+efficiently, but most importantly *transparently*.
 
 Just to whet your appetite, here it is an example with real data, where
 bcolz is already fulfilling the promise of accelerating memory I/O by
@@ -65,47 +77,83 @@ column-wise order, and this turns out to offer better opportunities to
 improve compression ratio.  This is because data tends to expose more
 similarity in elements that sit in the same column rather than those
 in the same row, so compressors generally do a much better job when
-data is aligned in such column-wise order.
+data is aligned in such column-wise order.  In addition, when you have
+to deal with tables with a large number of columns and your operations
+only involve some of them, a columnar-wise storage tends to be much
+more effective because minimizes the amount of data that travels to
+CPU caches.
 
 So, the ultimate goal for bcolz is not only reducing the memory needs
 of large arrays/tables, but also making bcolz operations to go faster
-than using a traditional ndarray object from NumPy.  That is already
-the case in some real-life scenarios (see the notebook above) but that
-will become pretty more noticeable in combination with forthcoming,
-faster CPUs integrating more cores and wider vector units.
+than using a traditional data container like those in NumPy or Pandas.
+That is actually already the case in some real-life scenarios (see the
+notebook above) but that will become pretty more noticeable in
+combination with forthcoming, faster CPUs integrating more cores and
+wider vector units.
 
 Requisites
 ----------
 
 - Python >= 2.6
-- NumPy >= 1.7
-- Cython >= 0.20 (just for compiling the beast)
-- Blosc >= 1.3.0 (optional, as the internal Blosc will be used by default)
+- NumPy >= 1.8
+- Cython >= 0.22 (just for compiling the beast)
+- C-Blosc >= 1.8.0 (optional, as the internal Blosc will be used by default)
 - unittest2 (optional, only in the case you are running Python 2.6)
+
+Optional:
+
+- numexpr >= 2.5.2
+- dask >= 0.9.0
+- pandas
+- tables (pytables)
 
 Building
 --------
 
-Assuming that you have the requisites and a C compiler installed, do::
+There are different ways to compile bcolz, depending if you want to
+link with an already installed Blosc library or not.
 
-  $ pip install -U bcolz
+Compiling with an installed Blosc library (recommended)
+.......................................................
 
-or, if you have unpacked the tarball locally::
+Python and Blosc-powered extensions have a difficult relationship when
+compiled using GCC, so this is why using an external C-Blosc library is
+recommended for maximum performance (for details, see
+https://github.com/Blosc/python-blosc/issues/110).
 
-  $ python setup.py build_ext --inplace
+Go to https://github.com/Blosc/c-blosc/releases and download and
+install the C-Blosc library.  Then, you can tell bcolz where is the
+C-Blosc library in a couple of ways:
 
-In case you have Blosc installed as an external library you can link
-with it (disregarding the included Blosc sources) in a couple of ways:
+Using an environment variable:
 
-Using an environment variable::
+.. code-block:: console
 
-  $ BLOSC_DIR=/usr/local     (or "set BLOSC_DIR=\blosc" on Win)
-  $ export BLOSC_DIR         (not needed on Win)
-  $ python setup.py build_ext --inplace
+    $ BLOSC_DIR=/usr/local     (or "set BLOSC_DIR=\blosc" on Win)
+    $ export BLOSC_DIR         (not needed on Win)
+    $ python setup.py build_ext --inplace
 
-Using a flag::
+Using a flag:
 
-  $ python setup.py build_ext --inplace --blosc=/usr/local
+.. code-block:: console
+
+    $ python setup.py build_ext --inplace --blosc=/usr/local
+
+Compiling without an installed Blosc library
+............................................
+
+bcolz also comes with the Blosc sources with it so, assuming that you
+have a C++ compiler installed, do:
+
+.. code-block:: console
+
+    $ python setup.py build_ext --inplace
+
+That's all.  You can proceed with testing section now.
+
+Note: The requirement for the C++ compiler is just for the Snappy
+dependency.  The rest of the other components of Blosc are pure C
+(including the LZ4 and Zlib libraries).
 
 Testing
 -------
@@ -122,7 +170,11 @@ Installing
 
 Install it as a typical Python package::
 
-  $ python setup.py install
+  $ pip install -U .
+
+Optionally Install the additional dependencies::
+
+  $ pip install .[optional]
 
 Documentation
 -------------
@@ -166,5 +218,3 @@ Let us know of any bugs, suggestions, gripes, kudos, etc. you may
 have.
 
 **Enjoy Data!**
-
-Francesc Alted

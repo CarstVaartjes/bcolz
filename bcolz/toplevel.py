@@ -2,7 +2,7 @@
 #
 #       License: BSD
 #       Created: September 10, 2010
-#       Author:  Francesc Alted - francesc@blosc.io
+#       Author:  Francesc Alted - francesc@blosc.org
 #
 ########################################################################
 
@@ -20,6 +20,7 @@ import numpy as np
 import bcolz
 from bcolz.ctable import ROOTDIRS
 from .py2help import xrange, _inttypes
+from distutils.version import LooseVersion
 
 
 def print_versions():
@@ -38,6 +39,12 @@ def print_versions():
     else:
         print("Numexpr version:   not available "
               "(version >= %s not detected)" % bcolz.min_numexpr_version)
+    if bcolz.dask_here:
+        print("Dask version:      %s" % bcolz.dask.__version__)
+    else:
+        print("Dask version:   not available "
+              "(version >= %s not detected)" % bcolz.min_dask_version)
+
     print("Python version:    %s" % sys.version)
     if os.name == "posix":
         (sysname, nodename, release, version, machine) = os.uname()
@@ -75,7 +82,7 @@ def set_nthreads(nthreads):
     """
     set_nthreads(nthreads)
 
-    Sets the number of threads to be used during carray operation.
+    Sets the number of threads to be used during bcolz operation.
 
     This affects to both Blosc and Numexpr (if available).  If you want to
     change this number only for Blosc, use `blosc_set_nthreads` instead.
@@ -83,7 +90,7 @@ def set_nthreads(nthreads):
     Parameters
     ----------
     nthreads : int
-        The number of threads to be used during carray operation.
+        The number of threads to be used during bcolz operation.
 
     Returns
     -------
@@ -163,8 +170,6 @@ def fromiter(iterable, dtype, count, **kwargs):
     iterables).
 
     """
-    _MAXINT_SIGNAL = 2**64
-
     # Check for a true iterable
     if not hasattr(iterable, "next"):
         iterable = iter(iterable)
@@ -176,14 +181,6 @@ def fromiter(iterable, dtype, count, **kwargs):
         if hasattr(iterable, "__length_hint__"):
             count = iterable.__length_hint__()
             expected = count
-        else:
-            # No guess
-            count = _MAXINT_SIGNAL
-            # If we do not have a hint on the iterable length then
-            # create a couple of iterables and use the second when the
-            # first one is exhausted (ValueError will be raised).
-            iterable, iterable2 = it.tee(iterable)
-            expected = 1000*1000   # 1 million elements
 
     # First, create the container
     expectedlen = kwargs.pop("expectedlen", expected)
@@ -203,36 +200,21 @@ def fromiter(iterable, dtype, count, **kwargs):
         chunklen = obj.chunklen
 
     # Then fill it
-    nread, blen = 0, 0
-    while nread < count:
-        if nread + chunklen > count:
-            blen = count - nread
-        else:
-            blen = chunklen
-        if count != _MAXINT_SIGNAL:
-            chunk = np.fromiter(iterable, dtype=dtype, count=blen)
-        else:
-            try:
-                chunk = np.fromiter(iterable, dtype=dtype, count=blen)
-            except ValueError:
-                # Positionate in second iterable
-                iter2 = it.islice(iterable2, nread, None, 1)
-                # We are reaching the end, use second iterable now
-                chunk = np.fromiter(iter2, dtype=dtype, count=-1)
-        obj.append(chunk)
-        nread += len(chunk)
-        # Check the end of the iterable
-        if len(chunk) < chunklen:
+    while True:
+        chunk = np.fromiter(it.islice(iterable, chunklen), dtype=dtype)
+        if len(chunk) == 0:
+            # Iterable has been exhausted
             break
+        obj.append(chunk)
     obj.flush()
     return obj
 
 
 def fill(shape, dflt=None, dtype=np.float, **kwargs):
-    """
-    fill(shape, dtype=float, dflt=None, **kwargs)
+    """fill(shape, dtype=float, dflt=None, **kwargs)
 
-    Return a new carray object of given shape and type, filled with `dflt`.
+    Return a new carray or ctable object of given shape and type, filled with
+    `dflt`.
 
     Parameters
     ----------
@@ -250,14 +232,31 @@ def fill(shape, dflt=None, dtype=np.float, **kwargs):
 
     Returns
     -------
-    out : carray
-        Array filled with `dflt` values with the given shape and dtype.
+    out : carray or ctable
+        Bcolz object filled with `dflt` values with the given shape and dtype.
 
     See Also
     --------
     ones, zeros
 
     """
+
+    def fill_helper(obj, dtype=None, length=None):
+        """Helper function to fill a carray with default values"""
+        assert isinstance(obj, bcolz.carray)
+        assert dtype is not None
+        assert length is not None
+        if type(length) is float:
+            length = int(length)
+
+        # Then fill it
+        # We need an array for the default so as to keep the atom info
+        dflt = np.array(obj.dflt, dtype=dtype.base)
+        # Fill chunk with defaults
+        chunk = np.empty(length, dtype=dtype)
+        chunk[:] = dflt
+        obj.append(chunk)
+        obj.flush()
 
     dtype = np.dtype(dtype)
     if type(shape) in _inttypes + (float,):
@@ -267,25 +266,29 @@ def fill(shape, dflt=None, dtype=np.float, **kwargs):
         if len(shape) > 1:
             # Multidimensional shape.
             # The atom will have shape[1:] dims (+ the dtype dims).
-            dtype = np.dtype((dtype.base, shape[1:]+dtype.shape))
+            dtype = np.dtype((dtype.base, shape[1:] + dtype.shape))
     length = shape[0]
 
     # Create the container
     expectedlen = kwargs.pop("expectedlen", length)
     if dtype.kind == "V" and dtype.shape == ():
-        raise ValueError("fill does not support ctables objects")
-    obj = bcolz.carray([], dtype=dtype, dflt=dflt, expectedlen=expectedlen,
-                       **kwargs)
-    chunklen = obj.chunklen
+        list_ca = []
+        # force carrays to live in memory
+        base_rootdir = kwargs.pop('rootdir', None)
+        for name, col_dype in dtype.descr:
+            dflt = np.zeros((), dtype=col_dype)
+            ca = bcolz.carray([], dtype=col_dype, dflt=dflt,
+                              expectedlen=expectedlen, **kwargs)
+            fill_helper(ca, dtype=ca.dtype, length=length)
+            list_ca.append(ca)
+        # bring rootdir back, ctable should live either on-disk or in-memory
+        kwargs['rootdir'] = base_rootdir
+        obj = bcolz.ctable(list_ca, names=dtype.names, **kwargs)
+    else:
+        obj = bcolz.carray([], dtype=dtype, dflt=dflt, expectedlen=expectedlen,
+                           **kwargs)
+        fill_helper(obj, dtype=dtype, length=length)
 
-    # Then fill it
-    # We need an array for the default so as to keep the atom info
-    dflt = np.array(obj.dflt, dtype=dtype)
-    # Making strides=(0,) below is a trick to create the array fast and
-    # without memory consumption
-    chunk = np.ndarray(length, dtype=dtype, buffer=dflt, strides=(0,))
-    obj.append(chunk)
-    obj.flush()
     return obj
 
 
@@ -307,8 +310,8 @@ def zeros(shape, dtype=np.float, **kwargs):
 
     Returns
     -------
-    out : carray
-        Array of zeros with the given shape and dtype.
+    out : carray or ctable
+        Bcolz object of zeros with the given shape and dtype.
 
     See Also
     --------
@@ -316,7 +319,8 @@ def zeros(shape, dtype=np.float, **kwargs):
 
     """
     dtype = np.dtype(dtype)
-    return fill(shape=shape, dflt=np.zeros((), dtype), dtype=dtype, **kwargs)
+    return fill(shape=shape, dflt=np.zeros((), dtype.base), dtype=dtype,
+                **kwargs)
 
 
 def ones(shape, dtype=np.float, **kwargs):
@@ -337,8 +341,8 @@ def ones(shape, dtype=np.float, **kwargs):
 
     Returns
     -------
-    out : carray
-        Array of ones with the given shape and dtype.
+    out : carray or ctable
+        Bcolz object of ones with the given shape and dtype.
 
     See Also
     --------
@@ -346,7 +350,8 @@ def ones(shape, dtype=np.float, **kwargs):
 
     """
     dtype = np.dtype(dtype)
-    return fill(shape=shape, dflt=np.ones((), dtype), dtype=dtype, **kwargs)
+    return fill(shape=shape, dflt=np.ones((), dtype.base), dtype=dtype,
+                **kwargs)
 
 
 def arange(start=None, stop=None, step=None, dtype=None, **kwargs):
@@ -381,7 +386,7 @@ def arange(start=None, stop=None, step=None, dtype=None, **kwargs):
     Returns
     -------
     out : carray
-        Array of evenly spaced values.
+        Bcolz object made of evenly spaced values.
 
         For floating point arguments, the length of the result is
         ``ceil((stop - start)/step)``.  Because of floating point overflow,
@@ -433,7 +438,7 @@ def arange(start=None, stop=None, step=None, dtype=None, **kwargs):
 
 
 def iterblocks(cobj, blen=None, start=0, stop=None):
-    """iterblocks(blen=None, start=0, stop=None)
+    """iterblocks(cobj, blen=None, start=0, stop=None)
 
     Iterate over a `cobj` (carray/ctable) in blocks of size `blen`.
 
@@ -453,9 +458,9 @@ def iterblocks(cobj, blen=None, start=0, stop=None):
     Returns
     -------
     out : iterable
-        This iterable returns buffers as NumPy arrays of homogeneous or
-        structured types, depending on whether `cobj` is a carray or a
-        ctable object.
+        This iterable returns data blocks as NumPy arrays of homogeneous or
+        structured types, depending on whether `cobj` is a carray or a ctable
+        object.
 
     See Also
     --------
@@ -489,10 +494,13 @@ def iterblocks(cobj, blen=None, start=0, stop=None):
         if blen is None:
             blen = cobj.chunklen
         for i in xrange(start, stop, blen):
-            buf = np.empty(blen, dtype=cobj.dtype)
+            buf = np.empty((blen,) + cobj.shape[1:], dtype=cobj.dtype)
             cobj._getrange(i, blen, buf)
             if i + blen > stop:
                 buf = buf[:stop - i]
+            if blen == 1:
+                # Remove leading dimension if it is 1
+                buf = buf[0]
             yield buf
 
 
@@ -545,8 +553,7 @@ def walk(dir, classname=None, mode='a'):
 
 
 class cparams(object):
-    """
-    cparams(clevel=None, shuffle=None, cname=None)
+    """cparams(clevel=None, shuffle=None, cname=None, quantize=None)
 
     Class to host parameters for compression and other filters.
 
@@ -554,10 +561,17 @@ class cparams(object):
     ----------
     clevel : int (0 <= clevel < 10)
         The compression level.
-    shuffle : bool
-        Whether the shuffle filter is active or not.
+    shuffle : int
+        The shuffle filter to be activated.  Allowed values are
+        bcolz.NOSHUFFLE (0), bcolz.SHUFFLE (1) and bcolz.BITSHUFFLE (2).  The
+        default is bcolz.SHUFFLE.
     cname : string ('blosclz', 'lz4', 'lz4hc', 'snappy', 'zlib')
         Select the compressor to use inside Blosc.
+    quantize : int (number of significant digits)
+        Quantize data to improve (lossy) compression.  Data is quantized using
+        np.around(scale*data)/scale, where scale is 2**bits, and bits is
+        determined from the quantize value.  For example, if quantize=1, bits
+        will be 4.  0 means that the quantization is disabled.
 
     In case some of the parameters are not passed, they will be
     set to a default (see `setdefaults()` method).
@@ -575,7 +589,7 @@ class cparams(object):
 
     @property
     def shuffle(self):
-        """Shuffle filter is active?"""
+        """Shuffle filter."""
         return self._shuffle
 
     @property
@@ -583,43 +597,68 @@ class cparams(object):
         """The compressor name."""
         return self._cname
 
+    @property
+    def quantize(self):
+        """Quantize filter."""
+        return self._quantize
+
     @staticmethod
-    def _checkparams(clevel, shuffle, cname):
+    def _checkparams(clevel, shuffle, cname, quantize):
         if clevel is not None:
             if not isinstance(clevel, int):
                 raise ValueError("`clevel` must be an int.")
             if clevel < 0:
-                raise ValueError("clevel must be a positive integer")
+                raise ValueError("`clevel` must be 0 or a positive integer.")
         if shuffle is not None:
             if not isinstance(shuffle, (bool, int)):
-                raise ValueError("`shuffle` must be a boolean.")
-            shuffle = bool(shuffle)
+                raise ValueError("`shuffle` must be an int.")
+            if shuffle not in [bcolz.NOSHUFFLE, bcolz.SHUFFLE, bcolz.BITSHUFFLE]:
+                raise ValueError("`shuffle` value not allowed.")
+            if (shuffle == bcolz.BITSHUFFLE and
+                LooseVersion(bcolz.blosc_version()[0]) < LooseVersion("1.8.0")):
+                raise ValueError("You need C-Blosc 1.8.0 or higher for using "
+                                 "BITSHUFFLE.")
         # Store the cname as bytes object internally
         if cname is not None:
             list_cnames = bcolz.blosc_compressor_list()
             if cname not in list_cnames:
                 raise ValueError(
                     "Compressor '%s' is not available in this build" % cname)
-        return clevel, shuffle, cname
+        if quantize is not None:
+            if not isinstance(quantize, int):
+                raise ValueError("`quantize` must be an int.")
+            if quantize < 0:
+                raise ValueError("`quantize` must be 0 or a positive integer.")
+        return clevel, shuffle, cname, quantize
 
     @staticmethod
-    def setdefaults(clevel=None, shuffle=None, cname=None):
-        """Change the defaults for `clevel`, `shuffle` and `cname` params.
+    def setdefaults(clevel=None, shuffle=None, cname=None, quantize=None):
+        """Change the defaults for compression params.
 
         Parameters
         ----------
         clevel : int (0 <= clevel < 10)
             The compression level.
-        shuffle : bool
-            Whether the shuffle filter is active or not.
+        shuffle : int
+            The shuffle filter to be activated.  Allowed values are
+            bcolz.NOSHUFFLE (0), bcolz.SHUFFLE (1) and bcolz.BITSHUFFLE (2).
+            The default is bcolz.SHUFFLE.
         cname : string ('blosclz', 'lz4', 'lz4hc', 'snappy', 'zlib')
             Select the compressor to use inside Blosc.
+        quantize : int (number of significant digits)
+            Quantize data to improve (lossy) compression.  Data is quantized
+            using np.around(scale*data)/scale, where scale is 2**bits, and
+            bits is determined from the quantize value.  For example, if
+            quantize=1, bits will be 4.  0 means that the quantization is
+            disabled.
 
         If this method is not called, the defaults will be set as in
-        defaults.py (``{clevel=5, shuffle=True, cname='blosclz'}``).
+        defaults.py:
+        (``{clevel=5, shuffle=bcolz.SHUFFLE, cname='lz4', quantize=None}``).
 
         """
-        clevel, shuffle, cname = cparams._checkparams(clevel, shuffle, cname)
+        clevel, shuffle, cname, quantize = cparams._checkparams(
+            clevel, shuffle, cname, quantize)
         dflts = bcolz.defaults.cparams
         if clevel is not None:
             dflts['clevel'] = clevel
@@ -627,18 +666,23 @@ class cparams(object):
             dflts['shuffle'] = shuffle
         if cname is not None:
             dflts['cname'] = cname
+        if quantize is not None:
+            dflts['quantize'] = quantize
 
-    def __init__(self, clevel=None, shuffle=None, cname=None):
-        clevel, shuffle, cname = cparams._checkparams(clevel, shuffle, cname)
+    def __init__(self, clevel=None, shuffle=None, cname=None, quantize=None):
+        clevel, shuffle, cname, quantize = cparams._checkparams(
+            clevel, shuffle, cname, quantize)
         dflts = bcolz.defaults.cparams
         self._clevel = dflts['clevel'] if clevel is None else clevel
         self._shuffle = dflts['shuffle'] if shuffle is None else shuffle
         self._cname = dflts['cname'] if cname is None else cname
+        self._quantize = dflts['quantize'] if quantize is None else quantize
 
     def __repr__(self):
         args = ["clevel=%d" % self._clevel,
                 "shuffle=%s" % self._shuffle,
                 "cname='%s'" % self._cname,
+                "quantize=%s" % self._quantize,
                 ]
         return '%s(%s)' % (self.__class__.__name__, ', '.join(args))
 

@@ -3,7 +3,7 @@
 #
 #       License: BSD
 #       Created: January 11, 2011
-#       Author:  Francesc Alted - francesc@blosc.io
+#       Author:  Francesc Alted - francesc@blosc.org
 #
 ########################################################################
 
@@ -87,7 +87,7 @@ class constructorTest(MayBeDiskTest):
         """Testing `fill` constructor (array default)"""
         a = np.ones((2, 2), dtype='(4,)i4') * 3
         b = bcolz.fill(
-            (2, 2), [3, 3, 3, 3], dtype='(4,)i4', rootdir=self.rootdir)
+            (2, 2), 3, dtype='(4,)i4', rootdir=self.rootdir)
         if self.open:
             b = bcolz.open(rootdir=self.rootdir)
         # print "b->", `b`
@@ -97,7 +97,7 @@ class constructorTest(MayBeDiskTest):
         """Testing `fill` constructor with open and resize (array default)"""
         a = np.ones((3, 200), dtype='(4,)i4') * 3
         b = bcolz.fill(
-            (2, 200), [3, 3, 3, 3], dtype='(4,)i4', rootdir=self.rootdir)
+            (2, 200), 3, dtype='(4,)i4', rootdir=self.rootdir)
         if self.open:
             b = bcolz.open(rootdir=self.rootdir)
         c = np.ones((1, 200), dtype='(4,)i4') * 3
@@ -109,7 +109,7 @@ class constructorTest(MayBeDiskTest):
         """Testing `fill` constructor with open and resize (nchunks>1)"""
         a = np.ones((3, 2000), dtype='(4,)i4') * 3
         b = bcolz.fill(
-            (2, 2000), [3, 3, 3, 3], dtype='(4,)i4', rootdir=self.rootdir)
+            (2, 2000), 3, dtype='(4,)i4', rootdir=self.rootdir)
         if self.open:
             b = bcolz.open(rootdir=self.rootdir)
         c = np.ones((1, 2000), dtype='(4,)i4') * 3
@@ -599,6 +599,40 @@ class iterTest(TestCase):
             assert_array_equal(a, r, "Arrays are not equal")
 
 
+class iterblocksTest(TestCase):
+
+    def test00(self):
+        """Testing `iterblocks()` (no start, stop, step)"""
+        N = 1000
+        a = np.ones((2,3), dtype="i4")
+        b = bcolz.ones((N, 3), dtype="i4")
+        # print "b->", `b`
+        l, s = 0, 0
+        for block in bcolz.iterblocks(b, blen=2):
+            assert_array_equal(a, block, "Arrays are not equal")
+            l += len(block)
+            s += block.sum()
+        self.assertEqual(l, N)
+        # as per Gauss summation formula
+        self.assertEqual(s, N*3)
+
+
+    def test01(self):
+        """Testing `iterblocks()` (w/ start, stop)"""
+        a = np.ones((2,3), dtype="i4")
+        b = bcolz.ones((1000, 3), dtype="i4")
+        # print "b->", `b`
+        l, s = 0, 0
+        for block in bcolz.iterblocks(b, blen=2, start=10, stop=100):
+            assert_array_equal(a, block, "Arrays are not equal")
+            l += len(block)
+            s += block.sum()
+        self.assertEqual(l, 90)
+        # as per Gauss summation formula
+        self.assertEqual(s, 90*3)
+
+
+
 class reshapeTest(TestCase):
 
     def test00a(self):
@@ -763,14 +797,16 @@ class evalTest():
     vm = "python"
 
     def setUp(self):
-        self.prev_vm = bcolz.defaults.eval_vm
-        if bcolz.numexpr_here:
-            bcolz.defaults.eval_vm = self.vm
+        self.prev_vm = bcolz.defaults.vm
+        if self.vm == "numexpr" and bcolz.numexpr_here:
+            bcolz.defaults.vm = "numexpr"
+        elif self.vm == "dask" and bcolz.dask_here:
+            bcolz.defaults.vm = "dask"
         else:
-            bcolz.defaults.eval_vm = "python"
+            bcolz.defaults.vm = "python"
 
     def tearDown(self):
-        bcolz.defaults.eval_vm = self.prev_vm
+        bcolz.defaults.vm = self.prev_vm
 
     def test00a(self):
         """Testing evaluation of ndcarrays (bool out)"""
@@ -800,8 +836,11 @@ class evalTest():
         """Testing evaluation of ndcarrays (reduction, no axis)"""
         a = np.arange(np.prod(self.shape)).reshape(self.shape)
         b = bcolz.arange(np.prod(self.shape)).reshape(self.shape)
-        if bcolz.defaults.eval_vm == "python":
+        if bcolz.defaults.vm == "python":
             assert_array_equal(sum(a), bcolz.eval("sum(b)"),
+                               "Arrays are not equal")
+        elif bcolz.defaults.vm == "dask":
+            assert_array_equal(a.sum(), bcolz.eval("da.sum(b)"),
                                "Arrays are not equal")
         else:
             self.assertEqual(a.sum(), bcolz.eval("sum(b)"))
@@ -810,9 +849,12 @@ class evalTest():
         """Testing evaluation of ndcarrays (reduction, with axis)"""
         a = np.arange(np.prod(self.shape)).reshape(self.shape)
         b = bcolz.arange(np.prod(self.shape)).reshape(self.shape)
-        if bcolz.defaults.eval_vm == "python":
+        if bcolz.defaults.vm == "python":
             # The Python VM does not have support for `axis` param
             assert_array_equal(sum(a), bcolz.eval("sum(b)"),
+                               "Arrays are not equal")
+        elif bcolz.defaults.vm == "dask":
+            assert_array_equal(a.sum(), bcolz.eval("da.sum(b)"),
                                "Arrays are not equal")
         else:
             assert_array_equal(a.sum(axis=1), bcolz.eval("sum(b, axis=1)"),
@@ -828,6 +870,11 @@ class d2eval_ne(evalTest, TestCase):
     vm = "numexpr"
 
 
+class d2eval_da(evalTest, TestCase):
+    shape = (3, 4)
+    vm = "dask"
+
+
 class d3eval_python(evalTest, TestCase):
     shape = (3, 4, 5)
 
@@ -837,6 +884,11 @@ class d3eval_ne(evalTest, TestCase):
     vm = "numexpr"
 
 
+class d3eval_da(evalTest, TestCase):
+    shape = (3, 4, 5)
+    vm = "dask"
+
+
 class d4eval_python(evalTest, TestCase):
     shape = (3, 40, 50, 2)
 
@@ -844,6 +896,11 @@ class d4eval_python(evalTest, TestCase):
 class d4eval_ne(evalTest, TestCase):
     shape = (3, 40, 50, 2)
     vm = "numexpr"
+
+
+class d4eval_dask(evalTest, TestCase):
+    shape = (3, 40, 50, 2)
+    vm = "dask"
 
 
 class computeMethodsTest(TestCase):

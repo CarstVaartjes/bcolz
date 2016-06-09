@@ -2,26 +2,50 @@
 #
 #       License: BSD
 #       Created: September 01, 2010
-#       Author:  Francesc Alted - francesc@blosc.io
+#       Author:  Francesc Alted - francesc@blosc.org
 #
 ########################################################################
 
 from __future__ import absolute_import
 
+from collections import namedtuple
+from itertools import islice
+import json
+from keyword import iskeyword
+import os
+import re
+import shutil
+import sys
+
 import numpy as np
 import bcolz
 from bcolz import utils, attrs, array2string
-import itertools
-from collections import namedtuple
-import json
-import os
-import shutil
-from .py2help import _inttypes, _strtypes, imap, xrange
+from .py2help import _inttypes, _strtypes, imap, izip, xrange
 
 _inttypes += (np.integer,)
-islice = itertools.islice
 
 ROOTDIRS = '__rootdirs__'
+
+re_ident = re.compile(r"^[^\d\W]\w*$", re.UNICODE)
+re_str_split = re.compile(",? *")
+
+
+def validate_names(columns, keyword='names'):
+    if not all([is_identifier(x) and not iskeyword(x) for x in columns]):
+        raise ValueError("{0} are not valid idenifiers".format(keyword))
+    return list(map(str, columns))
+
+
+def is_identifier(x):
+    # python 3 has str.isidentifier
+    return re_ident.match(x)
+
+
+def split_string(x):
+    # replicates the namedtuple behavior for string splitting on spaces
+    # and commas and calling str on names
+    # does not check for identifiers as keywords. that's done in validate_names
+    return re_str_split.split(str(x))
 
 
 class cols(object):
@@ -60,8 +84,15 @@ class cols(object):
         return self._cols[name]
 
     def __setitem__(self, name, carray):
-        self.names.append(name)
-        self._cols[name] = carray
+        if name in self.names:
+            # Column already exists.  Overwrite it.
+            if len(carray) != len(self._cols[name]):
+                raise ValueError(
+                    "new column length is inconsistent with ctable")
+            self._cols[name] = carray
+        else:
+            self.names.append(name)
+            self._cols[name] = carray
         self.update_meta()
 
     def __iter__(self):
@@ -98,16 +129,17 @@ class cols(object):
 
 
 class ctable(object):
-    """ This class represents a compressed, column-wise, in-memory table.
+    """This class represents a compressed, column-wise table.
 
     Create a new ctable from `cols` with optional `names`.
 
     Parameters
     ----------
     cols : tuple or list of column objects
-        The list of column data to build the ctable object.  This can also be
-        a pure NumPy structured array.  A list of lists or tuples is valid
-        too, as long as they can be converted into carray objects.
+        The list of column data to build the ctable object.  These are
+        typically carrays, but can also be a list of NumPy arrays or a pure
+        NumPy structured array.  A list of lists or tuples is valid too, as
+        long as they can be converted into carray objects.
     names : list of strings or string
         The list of names for the columns.  The names in this list must be
         valid Python identifiers, must not start with an underscore, and has
@@ -154,7 +186,7 @@ class ctable(object):
 
     @property
     def names(self):
-        "The names of the object (list)."
+        "The column names of the object (list)."
         return self.cols.names
 
     @property
@@ -218,9 +250,9 @@ class ctable(object):
         # Create a new ctable or open it from disk
         _new = False
         if self.mode in ('r', 'a'):
-            self.open_ctable()
+            self._open_ctable()
         elif columns is not None:
-            self.create_ctable(columns, names, **kwargs)
+            self._create_ctable(columns, names, **kwargs)
             _new = True
         else:
             raise ValueError(
@@ -233,12 +265,12 @@ class ctable(object):
         # Cache a structured array of len 1 for ctable[int] acceleration
         self._arr1 = np.empty(shape=(1,), dtype=self.dtype)
 
-    def create_ctable(self, columns, names, **kwargs):
+    def _create_ctable(self, columns, names, **kwargs):
         """Create a ctable anew."""
 
         # Create the rootdir if necessary
         if self.rootdir:
-            self.mkdir_rootdir(self.rootdir, self.mode)
+            self._mkdir_rootdir(self.rootdir, self.mode)
 
         # Get the names of the columns
         if names is None:
@@ -255,17 +287,14 @@ class ctable(object):
             if len(names) != len(columns):
                 raise ValueError(
                     "`columns` and `names` must have the same length")
-        # Check names validity
-        nt = namedtuple('_nt', list(names), verbose=False)
-        names = list(nt._fields)
+        # Check names validity. Cast to string.
+        names = validate_names(names)
 
         # Guess the kind of columns input
         calist, nalist, ratype = False, False, False
         if type(columns) in (tuple, list):
-            calist = [type(v) for v in columns] == \
-                     [bcolz.carray for v in columns]
-            nalist = [type(v) for v in columns] == \
-                     [np.ndarray for v in columns]
+            calist = all(isinstance(v, bcolz.carray) for v in columns)
+            nalist = all(isinstance(v, np.ndarray) for v in columns)
         elif isinstance(columns, np.ndarray):
             ratype = hasattr(columns.dtype, "names")
             if ratype:
@@ -308,10 +337,15 @@ class ctable(object):
         if self.auto_flush:
             self.flush()
 
-    def open_ctable(self):
+    def _open_ctable(self):
         """Open an existing ctable on-disk."""
         if self.mode == 'r' and not os.path.exists(self.rootdir):
-            raise KeyError("Disk-based ctable opened with `r`ead mode yet `rootdir` does not exist")
+            raise KeyError(
+                "Disk-based ctable opened with `r`ead mode "
+                "yet `rootdir='{rootdir}'` does not exist".format(
+                    rootdir=self.rootdir,
+                )
+            )
 
         # Open the ctable by reading the metadata
         self.cols.read_meta_and_open()
@@ -319,7 +353,7 @@ class ctable(object):
         # Get the length out of the first column
         self.len = len(self.cols[self.names[0]])
 
-    def mkdir_rootdir(self, rootdir, mode):
+    def _mkdir_rootdir(self, rootdir, mode):
         """Create the `self.rootdir` directory safely."""
         if os.path.exists(rootdir):
             if mode != "w":
@@ -346,13 +380,16 @@ class ctable(object):
         # Guess the kind of cols input
         calist, nalist, sclist, ratype = False, False, False, False
         if type(cols) in (tuple, list):
-            calist = [type(v) for v in cols] == [bcolz.carray for v in cols]
-            nalist = [type(v) for v in cols] == [np.ndarray for v in cols]
+            calist = all(isinstance(v, bcolz.carray) for v in cols)
+            nalist = all(isinstance(v, np.ndarray) for v in cols)
             if not (calist or nalist):
                 # Try with a scalar list
                 sclist = True
         elif isinstance(cols, np.ndarray):
             ratype = hasattr(cols.dtype, "names")
+        elif isinstance(cols, np.void):
+            ratype = hasattr(cols.dtype, "names")
+            sclist = True
         elif isinstance(cols, bcolz.ctable):
             # Convert int a list of carrays
             cols = [cols[name] for name in self.names]
@@ -379,7 +416,10 @@ class ctable(object):
             if sclist and not hasattr(column, '__len__'):
                 clen2 = 1
             else:
-                clen2 = 1 if isinstance(column, _strtypes) else len(column)
+                if isinstance(column, _strtypes):
+                    clen2 = 1
+                else:
+                    clen2 = len(column)
             if clen >= 0 and clen != clen2:
                 raise ValueError(
                     "all cols in `cols` must have the same length")
@@ -463,7 +503,7 @@ class ctable(object):
         if name is None:
             name = "f%d" % pos
         else:
-            if type(name) != str:
+            if not isinstance(name, _strtypes):
                 raise ValueError("`name` must be a string")
         if name in self.names:
             raise ValueError("'%s' column already exists" % name)
@@ -476,9 +516,9 @@ class ctable(object):
 
         kwargs.setdefault('cparams', self.cparams)
 
-        if isinstance(newcol, bcolz.carray) and \
-                        self.rootdir is not None and \
-                        newcol.rootdir is not None:
+        if (isinstance(newcol, bcolz.carray) and
+            self.rootdir is not None and
+            newcol.rootdir is not None):
             # a special case, where you have a disk-based carray is inserted in a disk-based ctable
             if move:  # move the the carray
                 shutil.move(newcol.rootdir, col_rootdir)
@@ -495,7 +535,8 @@ class ctable(object):
 
         # Insert the column
         self.cols.insert(name, pos, newcol)
-        # Update _arr1
+
+        # Update _arr1 for the new dtype
         self._arr1 = np.empty(shape=(1,), dtype=self.dtype)
 
         if self.auto_flush:
@@ -530,7 +571,7 @@ class ctable(object):
         if name is not None and pos is not None:
             raise ValueError("you cannot specify both a `name` and a `pos`")
         if name:
-            if type(name) != str:
+            if not isinstance(name, _strtypes):
                 raise ValueError("`name` must be a string")
             if name not in self.names:
                 raise ValueError("`name` not found in columns")
@@ -545,11 +586,11 @@ class ctable(object):
         # Remove the column
         col = self.cols.pop(name)
 
+        # Update _arr1 for the new dtype
+        self._arr1 = np.empty(shape=(1,), dtype=self.dtype)
+
         if not keep:
             col.purge()
-
-        # Update _arr1
-        self._arr1 = np.empty(shape=(1,), dtype=self.dtype)
 
         if self.auto_flush:
             self.flush()
@@ -635,21 +676,16 @@ class ctable(object):
             vals = df[key].values  # just a view as a numpy array
             if vals.dtype == np.object:
                 inferred_type = pd.lib.infer_dtype(vals)
-                # Next code could be made to work if
-                # pd.lib.max_len_string_array(vals) below would work
-                # with unicode in Python 2
-                # if inferred_type == 'unicode':
-                #     maxitemsize = pd.lib.max_len_string_array(vals)
-                #     print "maxitemsize:", maxitesize
-                #     # Convert the view into a carray of Unicode strings
-                #     col = bcolz.carray(vals,
-                #                        dtype='U%d' % maxitemsize, **ckwargs)
-                # elif inferred_type == 'string':
-                if inferred_type == 'string':
+                if inferred_type == 'unicode':
                     maxitemsize = pd.lib.max_len_string_array(vals)
-                    # Convert the view into a carray of regular strings
-                    col = bcolz.carray(vals, dtype='S%d' %
-                                       maxitemsize, **ckwargs)
+                    col = bcolz.carray(vals,
+                                       dtype='U%d' % maxitemsize, **ckwargs)
+                elif inferred_type == 'string':
+                    maxitemsize = pd.lib.max_len_string_array(vals)
+                    # In Python 3 strings should be represented as Unicode
+                    dtype = "U" if sys.version_info >= (3, 0) else "S"
+                    col = bcolz.carray(vals, dtype='%s%d' %
+                                       (dtype, maxitemsize), **ckwargs)
                 else:
                     col = vals
                 cols.append(col)
@@ -697,10 +733,11 @@ class ctable(object):
             raise
 
         # Use the names in kwargs, or if not there, the names in Table
-        if 'names' in kwargs:
-            names = kwargs.pop('names')
-        else:
-            names = t.colnames
+        names = kwargs.pop('names') if 'names' in kwargs else t.colnames
+        # Add the `expectedlen` param if necessary
+        if 'expectedlen' not in kwargs:
+            kwargs['expectedlen'] = len(t)
+
         # Collect metadata
         dtypes = [t.dtype.fields[name][0] for name in names]
         cols = [np.zeros(0, dtype=dt) for dt in dtypes]
@@ -789,7 +826,8 @@ class ctable(object):
         filters = tb.Filters(complevel=cparams['clevel'],
                              shuffle=cparams['clevel'],
                              complib=cname)
-        t = f.create_table(f.root, nodepath[1:], self.dtype, filters=filters)
+        t = f.create_table(f.root, nodepath[1:], self.dtype, filters=filters,
+                           expectedrows=len(self))
         # Set the attributes
         for key, val in self.attrs:
             t.attrs[key] = val
@@ -804,7 +842,46 @@ class ctable(object):
     def __sizeof__(self):
         return self.cbytes
 
-    def where(self, expression, outcols=None, limit=None, skip=0):
+    def _dtype_fromoutcols(self, outcols):
+        if outcols is None:
+            dtype = self.dtype
+        else:
+            if not isinstance(outcols, (list, tuple)):
+                raise ValueError("only a sequence is supported for outcols")
+            # Get the dtype for the outcols set
+            try:
+                dtype = [(name, self[name].dtype) for name in outcols]
+            except IndexError:
+                raise ValueError(
+                    "Some names in `outcols` are not actual column names")
+        return dtype
+
+    def _ud(self, user_dict):
+        """Update a user_dict with columns, locals and globals."""
+        d = user_dict.copy()
+        d.update(self.cols._cols)
+        f = sys._getframe(2)
+        d.update(f.f_globals)
+        d.update(f.f_locals)
+        return d
+
+    def _check_outcols(self, outcols):
+        """Check outcols."""
+        if outcols is None:
+            outcols = self.names
+        else:
+            if type(outcols) not in (list, tuple) + _strtypes:
+                raise ValueError("only list/str is supported for outcols")
+            if isinstance(outcols, _strtypes):
+                outcols = split_string(outcols)
+            # Check name validity
+            outcols = validate_names(outcols, 'outcols')
+            if (set(outcols) - set(self.names+['nrow__'])):
+                raise ValueError("outcols doesn't match names")
+        return outcols
+
+    def where(self, expression, outcols=None, limit=None, skip=0,
+              out_flavor=namedtuple, user_dict={}, vm=None):
         """Iterate over rows where `expression` is true.
 
         Parameters
@@ -822,12 +899,20 @@ class ctable(object):
             everything.
         skip : int
             An initial number of elements to skip.  The default is 0.
+        out_flavor : namedtuple, tuple or ndarray
+            Whether the returned rows are namedtuples or tuples.  Default are
+            named tuples.
+        user_dict : dict
+            An user-provided dictionary where the variables in expression
+            can be found by name.
+        vm : string
+            The virtual machine to be used in computations.  It can be
+            'numexpr', 'python' or 'dask'.  The default is to use 'numexpr' if
+            it is installed.
 
         Returns
         -------
         out : iterable
-            This iterable returns rows as NumPy structured types (i.e. they
-            support being mapped either by position or by name).
 
         See Also
         --------
@@ -836,9 +921,10 @@ class ctable(object):
         """
 
         # Check input
-        if type(expression) is str:
+        if isinstance(expression, _strtypes):
             # That must be an expression
-            boolarr = self.eval(expression)
+            boolarr = self.eval(expression, user_dict=self._ud(user_dict),
+                                vm=vm)
         elif hasattr(expression, "dtype") and expression.dtype.kind == 'b':
             boolarr = expression
         else:
@@ -846,16 +932,7 @@ class ctable(object):
                 "only boolean expressions or arrays are supported")
 
         # Check outcols
-        if outcols is None:
-            outcols = self.names
-        else:
-            if type(outcols) not in (list, tuple, str):
-                raise ValueError("only list/str is supported for outcols")
-            # Check name validity
-            nt = namedtuple('_nt', outcols, verbose=False)
-            outcols = list(nt._fields)
-            if set(outcols) - set(self.names+['nrow__']) != set():
-                raise ValueError("not all outcols are real column names")
+        outcols = self._check_outcols(outcols)
 
         # Get iterators for selected columns
         icols, dtypes = [], []
@@ -868,10 +945,74 @@ class ctable(object):
                 icols.append(col.where(boolarr, limit=limit, skip=skip))
                 dtypes.append((name, col.dtype))
         dtype = np.dtype(dtypes)
-        return self._iter(icols, dtype)
+        return self._iter(icols, dtype, out_flavor)
 
-    def whereblocks(self, expression, blen=None, outfields=None, limit=None,
-                    skip=0):
+    def fetchwhere(self, expression, outcols=None, limit=None, skip=0,
+                   out_flavor=None, user_dict={}, vm=None, **kwargs):
+        """Fetch the rows fulfilling the `expression` condition.
+
+        Parameters
+        ----------
+        expression : string or carray
+            A boolean Numexpr expression or a boolean carray.
+        outcols : list of strings or string
+            The list of column names that you want to get back in results.
+            Alternatively, it can be specified as a string such as 'f0 f1' or
+            'f0, f1'.  If None, all the columns are returned.  If the special
+            name 'nrow__' is present, the number of row will be included in
+            output.
+        limit : int
+            A maximum number of elements to return.  The default is return
+            everything.
+        skip : int
+            An initial number of elements to skip.  The default is 0.
+        out_flavor : string
+            The flavor for the `out` object.  It can be 'bcolz' or 'numpy'.
+            If None, the value is get from `bcolz.defaults.out_flavor`.
+        user_dict : dict
+            An user-provided dictionary where the variables in expression
+            can be found by name.
+        vm : string
+            The virtual machine to be used in computations.  It can be
+            'numexpr', 'python' or 'dask'.  The default is to use 'numexpr' if
+            it is installed.
+        kwargs : list of parameters or dictionary
+            Any parameter supported by the carray constructor.
+
+        Returns
+        -------
+        out : bcolz or numpy object
+            The outcome of the expression.  In case out_flavor='bcolz', you
+            can adjust the properties of this object by passing any additional
+            arguments supported by the carray constructor in `kwargs`.
+
+        See Also
+        --------
+        whereblocks
+
+        """
+        if out_flavor is None:
+            out_flavor = bcolz.defaults.out_flavor
+
+        if out_flavor == "numpy":
+            it = self.whereblocks(expression, len(self), outcols, limit, skip,
+                                  user_dict=self._ud(user_dict), vm=vm)
+            return next(it)
+        elif out_flavor in ("bcolz", "carray"):
+            dtype = self._dtype_fromoutcols(outcols)
+            it = self.where(expression, outcols, limit, skip,
+                            out_flavor=tuple, user_dict=self._ud(user_dict),
+                            vm=vm)
+            ct = bcolz.fromiter(it, dtype, count=-1, **kwargs)
+            ct.flush()
+            return ct
+        else:
+            raise ValueError(
+                "`out_flavor` can only take 'bcolz' or 'numpy values")
+
+
+    def whereblocks(self, expression, blen=None, outcols=None, limit=None,
+                    skip=0, user_dict={}, vm=None):
         """Iterate over the rows that fullfill the `expression` condition on
         this ctable, in blocks of size `blen`.
 
@@ -883,60 +1024,58 @@ class ctable(object):
             The length of the block that is returned.  The default is the
             chunklen, or for a ctable, the minimum of the different column
             chunklens.
-        outfields : list of strings or string
+        outcols : list of strings or string
             The list of column names that you want to get back in results.
             Alternatively, it can be specified as a string such as 'f0 f1' or
-            'f0, f1'.
+            'f0, f1'.  If None, all the columns are returned.  If the special
+            name 'nrow__' is present, the number of row will be included in
+            output.
         limit : int
             A maximum number of elements to return.  The default is return
             everything.
         skip : int
             An initial number of elements to skip.  The default is 0.
+        user_dict : dict
+            An user-provided dictionary where the variables in expression
+            can be found by name.
+        vm : string
+            The virtual machine to be used in computations.  It can be
+            'numexpr', 'python' or 'dask'.  The default is to use 'numexpr' if
+            it is installed.
 
         Returns
         -------
         out : iterable
-            This iterable returns buffers as NumPy arrays made of
-            structured types (or homogeneous ones in case `outfields` is a
-            single field.
+            The iterable returns numpy objects of blen length.
 
         See Also
         --------
-        iterblocks
+        See :py:func:`<bcolz.toplevel.iterblocks>` in toplevel functions.
 
         """
 
         if blen is None:
             # Get the minimum chunklen for every field
             blen = min(self[col].chunklen for col in self.cols)
-        if outfields is None:
-            dtype = self.dtype
-        else:
-            if not isinstance(outfields, (list, tuple)):
-                raise ValueError("only a sequence is supported for outfields")
-            # Get the dtype for the outfields set
-            try:
-                dtype = [(name, self[name].dtype) for name in outfields]
-            except IndexError:
-                raise ValueError(
-                    "Some names in `outfields` are not real fields")
 
-        buf = np.empty(blen, dtype=dtype)
-        nrow = 0
-        for row in self.where(expression, outfields, limit, skip):
-            buf[nrow] = row
-            nrow += 1
-            if nrow == blen:
-                yield buf
-                buf = np.empty(blen, dtype=dtype)
-                nrow = 0
-        yield buf[:nrow]
+        outcols = self._check_outcols(outcols)
+        dtype = self._dtype_fromoutcols(outcols)
+        it = self.where(expression, outcols, limit, skip, out_flavor=tuple,
+                        user_dict=self._ud(user_dict), vm=vm)
+        return self._iterwb(it, blen, dtype)
+
+    def _iterwb(self, it, blen, dtype):
+        while True:
+            ra = np.fromiter(islice(it, blen), dtype)
+            if len(ra) == 0:
+                break
+            yield ra
 
     def __iter__(self):
         return self.iter(0, self.len, 1)
 
     def iter(self, start=0, stop=None, step=1, outcols=None,
-             limit=None, skip=0):
+             limit=None, skip=0, out_flavor=namedtuple):
         """Iterator with `start`, `stop` and `step` bounds.
 
         Parameters
@@ -959,6 +1098,9 @@ class ctable(object):
             everything.
         skip : int
             An initial number of elements to skip.  The default is 0.
+        out_flavor : namedtuple, tuple or ndarray
+            Whether the returned rows are namedtuples or tuples.  Default are
+            named tuples.
 
         Returns
         -------
@@ -970,17 +1112,7 @@ class ctable(object):
 
         """
 
-        # Check outcols
-        if outcols is None:
-            outcols = self.names
-        else:
-            if type(outcols) not in (list, tuple, str):
-                raise ValueError("only list/str is supported for outcols")
-            # Check name validity
-            nt = namedtuple('_nt', outcols, verbose=False)
-            outcols = list(nt._fields)
-            if set(outcols) - set(self.names+['nrow__']) != set():
-                raise ValueError("not all outcols are real column names")
+        outcols = self._check_outcols(outcols)
 
         # Check limits
         if step <= 0:
@@ -1002,14 +1134,24 @@ class ctable(object):
                     col.iter(start, stop, step, limit=limit, skip=skip))
                 dtypes.append((name, col.dtype))
         dtype = np.dtype(dtypes)
-        return self._iter(icols, dtype)
+        return self._iter(icols, dtype, out_flavor)
 
-    def _iter(self, icols, dtype):
+    def _iter(self, icols, dtype, out_flavor):
         """Return a list of `icols` iterators with `dtype` names."""
 
         icols = tuple(icols)
-        namedt = namedtuple('row', dtype.names)
-        iterable = imap(namedt, *icols)
+        if out_flavor is namedtuple or out_flavor == "namedtuple":
+            namedt = namedtuple('row', dtype.names)
+            iterable = imap(namedt, *icols)
+        elif out_flavor is np.ndarray or out_flavor == "ndarray":
+            def setarr1(*val):
+                ret = self._arr1.copy()
+                ret.__setitem__(0, val)
+                return ret
+            iterable = imap(setarr1, *icols)
+        else:
+            # A regular tuple (fastest)
+            iterable = izip(*icols)
         return iterable
 
     def _where(self, boolarr, colnames=None):
@@ -1069,7 +1211,7 @@ class ctable(object):
         elif type(key) is list:
             if len(key) == 0:
                 return np.empty(0, self.dtype)
-            strlist = [type(v) for v in key] == [str for v in key]
+            strlist = all(isinstance(v, _strtypes) for v in key)
             # Range of column names
             if strlist:
                 cols = [self.cols[name] for name in key]
@@ -1088,7 +1230,7 @@ class ctable(object):
                 return self._where(key)
             elif np.issubsctype(key, np.int_):
                 # An integer array
-                return np.array([self[i] for i in key], dtype=self.dtype)
+                return np.array([tuple(self[i]) for i in key], dtype=self.dtype)
             else:
                 raise IndexError(
                     "arrays used as indices must be integer (or boolean)")
@@ -1096,7 +1238,7 @@ class ctable(object):
         elif isinstance(key, _strtypes):
             if key not in self.names:
                 # key is not a column name, try to evaluate
-                arr = self.eval(key, depth=4)
+                arr = self.eval(key, user_dict=self._ud({}))
                 if arr.dtype.type != np.bool_:
                     raise IndexError(
                         "`key` %s does not represent a boolean "
@@ -1124,26 +1266,37 @@ class ctable(object):
         """Sets values based on `key`.
 
         All the functionality of ``ndarray.__setitem__()`` is supported
-        (including fancy indexing), plus a special support for expressions:
+        (including fancy indexing), plus a special support for expressions.
 
         Parameters
         ----------
-        key : string
-            The corresponding ctable column name will be set to `value`.  If
-            not a column name, it will be interpret as a boolean expression
-            (computed via `ctable.eval`) and the rows where these values are
-            true will be set to `value`.
+        key : string, int, tuple, slice
+            If string and it matches a column name, this will be set to
+            `value`.  If string, but not a column name, it will be
+            interpreted as a boolean expression (computed via `ctable.eval`)
+            and the rows where these values are true will be set to `value`.
+            If int or slice, then the corresponding rows will be set to
+            `value`.
+
+        value : object
+            The values to be set.
 
         See Also
         --------
         ctable.eval
 
         """
+        if isinstance(key, (bytes, str)):
+            # First, check if the key is a column name
+            if key in self.names:
+                # Yes, so overwrite it
+                self.cols[key] = value
+                return
 
-        # First, convert value into a structured array
+        # Else, convert value into a structured array
         value = utils.to_ndarray(value, self.dtype)
         # Check if key is a condition actually
-        if type(key) is bytes:
+        if isinstance(key, (bytes, str)):
             # Convert key into a boolean array
             # key = self.eval(key)
             # The method below is faster (specially for large ctables)
@@ -1158,7 +1311,8 @@ class ctable(object):
                         self.cols[name][nrow] = value[name][rowval]
                     rowval += 1
             return
-        # Then, modify the rows
+
+        # key should int or slice, so modify the rows
         for name in self.names:
             self.cols[name][key] = value[name]
         return
@@ -1174,26 +1328,23 @@ class ctable(object):
             calling function's frame.  These variables may be column
             names in this table, scalars, carrays or NumPy arrays.
         kwargs : list of parameters or dictionary
-            Any parameter supported by the `eval()` first level function.
+            Any parameter supported by the `eval()` top level function.
 
         Returns
         -------
-        out : carray object
+        out : bcolz object
             The outcome of the expression.  You can tailor the
-            properties of this carray by passing additional arguments
-            supported by carray constructor in `kwargs`.
+            properties of this object by passing additional arguments
+            supported by the carray constructor in `kwargs`.
 
         See Also
         --------
-        eval (first level function)
+        eval (top level function)
 
         """
-
-        # Get the desired frame depth
-        depth = kwargs.pop('depth', 3)
-        # Call top-level eval with cols as user_dict
-        return bcolz.eval(expression, user_dict=self.cols, depth=depth,
-                          **kwargs)
+        # Call top-level eval with cols, locals and gloabls as user_dict
+        user_dict = kwargs.pop('user_dict', {})
+        return bcolz.eval(expression, user_dict=self._ud(user_dict), **kwargs)
 
     def flush(self):
         """Flush data in internal buffers to disk.
@@ -1258,7 +1409,8 @@ class ctable(object):
         return self
 
     def __exit__(self, type, value, tb):
-        self.flush()
+        if self.mode != 'r':
+            self.flush()
 
 # Local Variables:
 # mode: python

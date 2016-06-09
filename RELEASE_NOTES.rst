@@ -2,6 +2,312 @@
 Release notes for bcolz
 =======================
 
+Changes from 1.0.0 to 1.1.0
+===========================
+
+- Defaults when creating carray/ctable objects are always scalars now.
+  The new approach follows what was documented and besides it prevents
+  storing too much JSON data in meta/ directory.
+
+- Fixed an issue with bcolz.iterblocks() not working on multidimensional
+  carrays.
+
+- It is possible now to create ctables with more than 255 columns.  Thanks
+  to Skipper Seabold.  Fixes #131 (via PR #303).
+
+- Added a new `quantize` filter for allowing lossy compression on
+  floating point data.  Data is quantized using
+  np.around(scale*data)/scale, where scale is 2**bits, and bits is
+  determined from the quantize value.  For example, if quantize=1, bits
+  will be 4.  0 means that the quantization is disabled.
+
+  Here it is an example of what you can get from the new quantize:
+
+  In [9]: a = np.cumsum(np.random.random_sample(1000*1000)-0.5)
+
+  In [10]: bcolz.carray(a, cparams=bcolz.cparams(quantize=0))  # no quantize
+  Out[10]:
+  carray((1000000,), float64)
+    nbytes: 7.63 MB; cbytes: 6.05 MB; ratio: 1.26
+    cparams := cparams(clevel=5, shuffle=1, cname='blosclz', quantize=0)
+  [ -2.80946077e-01  -7.63925274e-01  -5.65575047e-01 ...,   3.59036158e+02
+     3.58546624e+02   3.58258860e+02]
+
+  In [11]: bcolz.carray(a, cparams=bcolz.cparams(quantize=1))
+  Out[11]:
+  carray((1000000,), float64)
+    nbytes: 7.63 MB; cbytes: 1.41 MB; ratio: 5.40
+    cparams := cparams(clevel=5, shuffle=1, cname='blosclz', quantize=1)
+  [ -2.50000000e-01  -7.50000000e-01  -5.62500000e-01 ...,   3.59036158e+02
+     3.58546624e+02   3.58258860e+02]
+
+  In [12]: bcolz.carray(a, cparams=bcolz.cparams(quantize=2))
+  Out[12]:
+  carray((1000000,), float64)
+    nbytes: 7.63 MB; cbytes: 2.20 MB; ratio: 3.47
+    cparams := cparams(clevel=5, shuffle=1, cname='blosclz', quantize=2)
+  [ -2.81250000e-01  -7.65625000e-01  -5.62500000e-01 ...,   3.59036158e+02
+     3.58546624e+02   3.58258860e+02]
+
+  In [13]: bcolz.carray(a, cparams=bcolz.cparams(quantize=3))
+  Out[13]:
+  carray((1000000,), float64)
+    nbytes: 7.63 MB; cbytes: 2.30 MB; ratio: 3.31
+    cparams := cparams(clevel=5, shuffle=1, cname='blosclz', quantize=3)
+  [ -2.81250000e-01  -7.63671875e-01  -5.65429688e-01 ...,   3.59036158e+02
+     3.58546624e+02   3.58258860e+02]
+
+  As you can see, the compression ratio can improve pretty significantly
+  when using the quantize filter.  It is important to note that by using
+  quantize you are loosing precision on your floating point data.
+
+  Also note how the first elements in the quantized arrays have less
+  significant digits, but not the last ones.  This is a side effect due
+  to how bcolz stores the trainling data that do not fit in a whole
+  chunk.  But in general you should expect a loss in precision.
+
+- Fixed a bug in carray.__getitem__() when the chunksize was not an
+  exact multiple of the blocksize.  Added test:
+  test_carray.py::getitemMemoryTest::test06.
+
+- bcolz now follows the convention introduced in NumPy 1.11 for
+  representing datetime types with TZ="naive" (i.e. with no TZ info in
+  the representation).  See https://github.com/numpy/numpy/blob/master/doc/release/1.11.0-notes.rst#datetime64-changes.
+
+- bcolz now releases the GIL during Blosc compression/decompression.  In
+  multi-threaded environments, a single-threaded, contextual version of
+  Blosc is used instead (this is useful for frameworks like Dask).
+
+- Removed from the ``cbytes`` count the storage overhead due to the
+  internal container.  This overhead was media-dependent, and it was
+  just a guess anyway.
+
+- The -O1 compilation flag has been removed and bcolz is compiled now at
+  full optimization.  I have tested that for several weeks, without any
+  segfault, so this should be pretty safe.
+
+- Added information about the chunklen, chunksize and blocksize (the
+  size of the internal blocks in a Blosc chunk) in the repr() of a
+  carray.
+
+- New accelerated codepath for `carray[:] = array` assignation.  This
+  operation should be close in performance to `carray.copy()` now.
+
+- carray object does implement the __array__() special method
+  (http://docs.scipy.org/doc/numpy-1.10.1/reference/arrays.classes.html#numpy.class.__array__)
+  now. With this, interoperability with numpy arrays is easier and
+  faster:
+
+  Before __array__()::
+    >>> a = np.arange(1e7)
+    >>> b = np.arange(1e7)
+    >>> ca = bcolz.carray(a)
+    >>> cb = bcolz.carray(b)
+    >>> %timeit ca + a
+    1 loop, best of 3: 1.06 s per loop
+    >>> %timeit np.array(bcolz.eval("ca*(cb+1)"))
+    1 loop, best of 3: 1.18 s per loop
+
+  After __array__()::
+    >>> %timeit ca + a
+    10 loops, best of 3: 45.2 ms per loop
+    >>> %timeit np.array(bcolz.eval("ca*(cb+1)"))
+    1 loop, best of 3: 133 ms per loop
+
+  And it also allows to use bcolz carrays more efficiently in some scenarios::
+    >>> import numexpr
+    >>> %timeit numexpr.evaluate("ca*(cb+1)")
+    10 loops, best of 3: 76.2 ms per loop
+    >>> %timeit numexpr.evaluate("a*(b+1)")
+    10 loops, best of 3: 25.5 ms per loop  # ndarrays are still faster
+
+- Internal C-Blosc sources bumped to 1.9.2.
+
+- Dask (dask.pydata.org) is supported as another virtual machine backed
+  for bcolz.eval().  Now, either Numexpr (the default) or Dask or even
+  the Python interpreter can be used to evaluate complex expressions.
+
+- The default compressor has been changed from 'blosclz' to 'lz4'.
+  BloscLZ tends to be a bit faster when decompressing, but LZ4 is
+  quickly catching up as the compilers are making progress with memory
+  access optimizations.  Also, LZ4 is considerably faster during
+  compression and in general compresses better too.
+
+- The supported SIMD extensions (SSE2 and AVX2) of the current platform
+  are auto-detected so that the affected code will selectively be
+  included from vendored C-Blosc sources.
+
+- Added a new `blen` parameter to bcolz.eval() so that the user can
+  select the length of the operand blocks to be operated with.
+
+- New fine-tuning of the automatically computed blen in bcolz.eval() for
+  better times and reduced memory consumption.
+
+- Added a new `out_flavor` parameter to the ctable.iter() and
+  ctable.where() for specifying the type of result rows.  Now one can
+  select namedtuple (default), tuple or ndarray.
+
+- The performance of carray.whereblocks() has been accelerated 2x due to
+  the internal use of tuples instead of named tuples.
+
+- New ctable.fetchwhere() method for getting the rows fulfilling some
+  condition in one go.
+
+- Parameter `outfields` in ctable.whereblocks has been renamed to
+  `outcols` for consistency with the other methods.  The previous
+  'outfields' name is considered a bug and hence is not supported
+  anymore.
+
+- bcolz.fromiter() has been streamlined and optimized.  The result is
+  that it uses less memory and can go faster too (20% ~ 50%, depending
+  on the use).
+
+- The values for defaults.eval_out_flavor has been changed to ['bcolz',
+  'numpy'] instead of previous ['carray', 'numpy'].  For backward
+  compatibility the 'carray' value is still allowed.
+
+- The `bcolz.defaults.eval_out_flavor` and `bcolz.defaults.eval_vm` have
+  been renamed to `bcolz.defaults.out_flavor` and `bcolz.defaults.vm`
+  because they can be used in other places than just bcolz.eval().  The
+  old `eval_out_flavor` and `eval_vm` properties of the `defaults`
+  object are still kept for backward compatibility, but they are not
+  documented anymore and its use is discouraged.
+
+- Added a new `user_dict` parameter in all ctable methods that evaluate
+  expressions.  For convenience, this dictionary is updated internally
+  with ctable columns, locals and globals from the caller.
+
+- Small optimization for using the recently added re_evaluate() function
+  in numexpr for faster operation of numexpr inside loops using the same
+  expression (quite common scenario).
+
+- Unicode strings are recognized now when imported from a pandas
+  dataframe, making the storage much more efficient.  Before unicode was
+  converted into 'O'bject type, but the change to 'U'nicode should be
+  backward compatible.
+
+- Added `vm` parameter to specify the virtual machine for doing internal
+  operations in ctable.where(), ctable.fetchwhere() and
+  ctable.whereblocks().
+
+
+Changes from 0.12.1 to 1.0.0
+============================
+
+- New version of embedded C-Blosc (bumped to 1.8.1).  This allows for
+  using recent C-Blosc features like the BITSHUFFLE filter that
+  generally allows for better compression ratios at the expense of some
+  slowdown.  Look into the carray tutorial on how to use the new
+  BITSHUFFLE filter.
+
+- Use the -O1 flag for compiling the included C-Blosc sources on Linux.
+  This represents slower performance, but fixes nasty segfaults as can
+  be seen in issue #110 of python-blosc.  Also, it prints a warning for
+  using an external C-Blosc library.
+
+- Improved support for operations with carrays of shape (N, 1). PR #296.
+  Fixes #165 and #295.  Thanks to Kevin Murray.
+
+- Check that column exists before inserting a new one in a ctable via
+  `__setitem__`.  If it exists, the existing column is overwritten.
+  Fixes #291.
+
+- Some optimisations have been made within ``carray.__getitem__`` to
+  improve performance when extracting a slice of data from a
+  carray. This is particularly relevant when running some computation
+  chunk-by-chunk over a large carray. (#283 @alimanfoo).
+
+
+Changes from 0.12.0 to 0.12.1
+=============================
+
+- ``setup.py`` now defers operations requiring ``numpy`` and ``Cython``
+  until after those modules have been installed by ``setuptools``.  This
+  means that users no longer need to pre-install ``numpy`` and
+  ``Cython`` to install ``bcolz``.
+
+
+Changes from 0.11.4 to 0.12.0
+=============================
+
+- Fixes an installation glitch for Windows. (#268 @cgohlke).
+
+- The tutorial is now a Jupyter notebook. (#261 @FrancescElies).
+
+- Replaces numpy float string specifier in test with numpy.longdouble
+  (#271 @msarahan).
+
+- Fix for allowing the use of variables of type string in `eval()` and
+  other queries. (#273, @FrancescAlted).
+
+- The size of the tables during import/export to HDF5 are honored now
+  via the `expectedlen` (bcolz) and `expectedrows` (PyTables)
+  parameters (@FrancescAlted).
+
+- Update only the valid part of the last chunk during boolean
+  assignments.  Fixes a VisibleDeprecationWarning with NumPy 1.10
+  (@FrancescAlted).
+
+- More consistent string-type checking to allow use of unicode strings
+  in Python 2 for queries, column selection, etc. (#274 @BrenBarn).
+
+- Installation no longer fails when listed as dependency of project
+  installed via setup.py develop or setup.py install. (#280 @mindw,
+  fixes #277).
+
+- Paver setup has been deprecated (see #275).
+
+
+Changes from 0.11.3 to 0.11.4
+=============================
+
+- The .pyx extension is not packed using the absolute path anymore.
+  (#266 @FrancescAlted)
+
+
+Changes from 0.11.2 to 0.11.3
+=============================
+
+- Implement feature #255 bcolz.zeros can create new ctables too, either
+  empty or filled with zeros. (#256 @FrancescElies @FrancescAlted)
+
+
+Changes from 0.11.1 to 0.11.2
+=============================
+
+- Changed the `setuptools>18.3` dependency to `setuptools>18.0` because
+  Anaconda does not have `setuptools > 18.1` yet.
+
+
+Changes from 0.11.0 to 0.11.1
+=============================
+
+- Do not try to flush when a ctable is opened in 'r'ead-only mode.
+  See issue #252.
+
+- Added the mock dependency for Python2.
+
+- Added a `setuptools>18.3` dependency.
+
+- Several fixes in the tutorial (Francesc Elies).
+
+
+Changes from 0.10.0 to 0.11.0
+=============================
+
+- Added support for appending a np.void to ctable objects
+  (closes ticket #229 @eumiro)
+
+- Do not try to flush when an carray is opened in 'r'ead-only mode.
+  (closes #241 @FrancescAlted).
+
+- Fix appending of object arrays to already existing carrays
+  (closes #243 @cpcloud)
+
+- Great modernization of setup.py by using new versioning and many
+  other improvements (PR #239 @mindw).
+
+
 Changes from 0.9.0 to 0.10.0
 ============================
 
@@ -11,7 +317,7 @@ Changes from 0.9.0 to 0.10.0
   ``for chunk_ in ca._chunks``, added "internal use" indicator to carray
   chunks attribute. (#153 @FrancescElies and @esc)
 
-- Fix a memory leak in the ``chunk.getudata`` method where. (#201 @esc)
+- Fix a memory leak and avoid copy in ``chunk.getudata``. (#201 #202 @esc)
 
 - Fix the error message when trying to open a fresh ctable in an existing
   rootdir. (#191 @twiecki @esc)
@@ -22,7 +328,17 @@ Changes from 0.9.0 to 0.10.0
 - Implement context manager for ``carray`` and ``ctable``.
   (#135 #210 @FrancescElies and @esc)
 
-- Various refactorings and cleanups. (#198 #199 #200)
+- Fix handling and API for leftovers. (#72 #132 #211 #213 @FrancescElies @esc)
+
+- Fix bug for incorrect leftover value. (#208 @waylonflinn)
+
+- Documentation: document how to write extensions, update docstrings and
+  mention the with statement / context manager. (#214 @FrancescElies)
+
+- Various refactorings and cleanups. (#190 #198 #197 #199 #200)
+
+- Fix bug creating carrays from transposed arrays without explicit dtype.
+  (#217 #218 @sdvillal)
 
 
 Changes from 0.8.1 to 0.9.0
@@ -65,6 +381,7 @@ Changes from 0.8.0 to 0.8.1
 - Fix license include (#143 @esc)
 
 - Upgrade to Cython 0.22 (#145 @esc)
+
 
 Changes from 0.7.3 to 0.8.0
 ===========================

@@ -2,131 +2,77 @@
 #
 # License: BSD
 #       Created: August 16, 2012
-#       Author:  Francesc Alted - francesc@blosc.io
+#       Author:  Francesc Alted - francesc@blosc.org
 #
 ########################################################################
 
 from __future__ import absolute_import
 
-import sys
+from sys import version_info as v
+
+# Check this Python version is supported
+if any([v < (2, 6), (3,) < v < (3, 3)]):
+    raise Exception("Unsupported Python version %d.%d. Requires Python >= 2.6 "
+                    "or >= 3.3." % v[:2])
+
+import platform
 import os
-import glob
-from distutils.core import Extension
-from distutils.core import setup
-import textwrap
-import re, platform
+from glob import glob
+import sys
+import re
+
+from setuptools import setup, Extension, find_packages
+from pkg_resources import resource_filename
+
+# For guessing the capabilities of the CPU for C-Blosc
+import cpuinfo
 
 
-########### Some utils for version checking ################
+class LazyCommandClass(dict):
+    """
+    Lazy command class that defers operations requiring Cython and numpy until
+    they've actually been downloaded and installed by setup_requires.
+    """
+    def __contains__(self, key):
+        return (
+            key == 'build_ext'
+            or super(LazyCommandClass, self).__contains__(key)
+        )
 
-# Some functions for showing errors and warnings.
-def _print_admonition(kind, head, body):
-    tw = textwrap.TextWrapper(
-        initial_indent='   ', subsequent_indent='   ')
+    def __setitem__(self, key, value):
+        if key == 'build_ext':
+            raise AssertionError("build_ext overridden!")
+        super(LazyCommandClass, self).__setitem__(key, value)
 
-    print( ".. %s:: %s" % (kind.upper(), head))
-    for line in tw.wrap(body):
-        print(line)
+    def __getitem__(self, key):
+        if key != 'build_ext':
+            return super(LazyCommandClass, self).__getitem__(key)
 
+        from Cython.Distutils import build_ext as cython_build_ext
 
-def exit_with_error(head, body=''):
-    _print_admonition('error', head, body)
-    sys.exit(1)
+        class build_ext(cython_build_ext):
+            """
+            Custom build_ext command that lazily adds numpy's include_dir to
+            extensions.
+            """
+            def build_extensions(self):
+                """
+                Lazily append numpy's include directory to Extension includes.
 
+                This is done here rather than at module scope because setup.py
+                may be run before numpy has been installed, in which case
+                importing numpy and calling `numpy.get_include()` will fail.
+                """
+                numpy_incl = resource_filename('numpy', 'core/include')
+                for ext in self.extensions:
+                    ext.include_dirs.append(numpy_incl)
 
-def print_warning(head, body=''):
-    _print_admonition('warning', head, body)
-
-
-def check_import(pkgname, pkgver):
-    try:
-        mod = __import__(pkgname)
-    except ImportError:
-        exit_with_error(
-            "You need %(pkgname)s %(pkgver)s or greater to run bcolz!"
-            % {'pkgname': pkgname, 'pkgver': pkgver})
-    else:
-        if mod.__version__ < pkgver:
-            exit_with_error(
-                "You need %(pkgname)s %(pkgver)s or greater to run bcolz!"
-                % {'pkgname': pkgname, 'pkgver': pkgver})
-
-    print("* Found %(pkgname)s %(pkgver)s package installed."
-          % {'pkgname': pkgname, 'pkgver': mod.__version__})
-    globals()[pkgname] = mod
-
-
-########### Check versions ##########
-
-# The minimum version of Cython required for generating extensions
-min_cython_version = '0.22'
-# The minimum version of NumPy required
-min_numpy_version = '1.7'
-# The minimum version of Numexpr (optional)
-min_numexpr_version = '1.4.1'
-
-# Check for Python
-if sys.version_info[0] == 2:
-    if sys.version_info[1] < 6:
-        exit_with_error("You need Python 2.6 or greater to run bcolz!")
-    if sys.version_info[1] < 7:
-        try:
-            import unittest2
-        except ImportError:
-            print("You need unittest2 for running bcolz tests with Python 2.6!")
-elif sys.version_info[0] == 3:
-    if sys.version_info[1] < 2:
-        exit_with_error("You need Python 3.2 or greater to run bcolz!")
-else:
-    exit_with_error("You need Python 2.6/3.2 or greater to run bcolz!")
-
-# Check if Cython is installed or not (requisite)
-try:
-    import Cython
-    cur_cython_version = Cython.__version__
-    from Cython.Distutils import build_ext
-except:
-    exit_with_error(
-        "You need %(pkgname)s %(pkgver)s or greater to compile bcolz!"
-        % {'pkgname': 'Cython', 'pkgver': min_cython_version})
-
-if cur_cython_version < min_cython_version:
-    exit_with_error(
-        "At least Cython %s is needed so as to generate extensions!"
-        % (min_cython_version))
-else:
-    print("* Found %(pkgname)s %(pkgver)s package installed."
-          % {'pkgname': 'Cython', 'pkgver': cur_cython_version})
-
-# Check for NumPy
-check_import('numpy', min_numpy_version)
-
-# Check for Numexpr
-numexpr_here = False
-try:
-    import numexpr
-except ImportError:
-    print_warning(
-        "Numexpr is not installed.  For faster bcolz operation, "
-        "please consider installing it.")
-else:
-    if numexpr.__version__ >= min_numexpr_version:
-        numexpr_here = True
-        print("* Found %(pkgname)s %(pkgver)s package installed."
-              % {'pkgname': 'numexpr', 'pkgver': numexpr.__version__})
-    else:
-        print_warning(
-            "Numexpr %s installed, but version is not >= %s.  "
-            "Disabling support for it." % (
-                numexpr.__version__, min_numexpr_version))
-
-########### End of checks ##########
-
-
-# bcolz version
-VERSION = open('VERSION').read().strip()
-# Create the version.py file
-open('bcolz/version.py', 'w').write('__version__ = "%s"\n' % VERSION)
+                # This explicitly calls the superclass method rather than the
+                # usual super() invocation because distutils' build_class, of
+                # which Cython's build_ext is a subclass, is an old-style class
+                # in Python 2, which doesn't support `super`.
+                cython_build_ext.build_extensions(self)
+        return build_ext
 
 
 # Global variables
@@ -140,11 +86,8 @@ inc_dirs = ['bcolz']
 lib_dirs = []
 libs = []
 def_macros = []
-sources = ["bcolz/carray_ext.pyx"]
+sources = ['bcolz/carray_ext.pyx']
 
-# Include NumPy header dirs
-from numpy.distutils.misc_util import get_numpy_include_dirs
-inc_dirs.extend(get_numpy_include_dirs())
 optional_libs = []
 
 # Handle --blosc=[PATH] --lflags=[FLAGS] --cflags=[FLAGS]
@@ -160,47 +103,63 @@ for arg in args:
         CFLAGS = arg.split('=')[1].split()
         sys.argv.remove(arg)
 
-if not BLOSC_DIR:
-    # Compiling everything from sources
-    # Blosc + BloscLZ sources
-    sources += glob.glob('c-blosc/blosc/*.c')
-    # LZ4 sources
-    sources += glob.glob('c-blosc/internal-complibs/lz4*/*.c')
-    # Snappy sources
-    sources += glob.glob('c-blosc/internal-complibs/snappy*/*.cc')
-    # Zlib sources
-    sources += glob.glob('c-blosc/internal-complibs/zlib*/*.c')
-    # Finally, add all the include dirs...
-    inc_dirs += [os.path.join('c-blosc', 'blosc')]
-    inc_dirs += glob.glob('c-blosc/internal-complibs/*')
-    # ...and the macros for all the compressors supported
-    def_macros += [('HAVE_LZ4', 1), ('HAVE_SNAPPY', 1), ('HAVE_ZLIB', 1)]
-else:
-    inc_dirs += [os.path.join(BLOSC_DIR, 'include')]
+if BLOSC_DIR != '':
+    # Using the Blosc library
     lib_dirs += [os.path.join(BLOSC_DIR, 'lib')]
+    inc_dirs += [os.path.join(BLOSC_DIR, 'include')]
     libs += ['blosc']
+else:
+    # Compiling everything from sources
+    sources += [f for f in glob('c-blosc/blosc/*.c')
+                if 'avx2' not in f and 'sse2' not in f]
+    sources += glob('c-blosc/internal-complibs/lz4*/*.c')
+    sources += glob('c-blosc/internal-complibs/snappy*/*.cc')
+    sources += glob('c-blosc/internal-complibs/zlib*/*.c')
+    inc_dirs += [os.path.join('c-blosc', 'blosc')]
+    inc_dirs += glob('c-blosc/internal-complibs/*')
+    def_macros += [('HAVE_LZ4', 1), ('HAVE_SNAPPY', 1), ('HAVE_ZLIB', 1)]
 
-# Add -msse2 flag for optimizing shuffle in included c-blosc
-# (only necessary for 32-bit Intel architectures)
-if os.name == 'posix' and re.match("i.86", platform.machine()) != None:
-    CFLAGS.append("-msse2")
+    # Guess SSE2 or AVX2 capabilities
+    cpu_info = cpuinfo.get_cpu_info()
+    # SSE2
+    if 'sse2' in cpu_info['flags']:
+        print('SSE2 detected')
+        CFLAGS.append('-DSHUFFLE_SSE2_ENABLED')
+        sources += [f for f in glob('c-blosc/blosc/*.c') if 'sse2' in f]
+        if os.name == 'posix':
+            CFLAGS.append('-msse2')
+        elif os.name == 'nt':
+            def_macros += [('__SSE2__', 1)]
+
+    # AVX2
+    if 'avx2' in cpu_info['flags']:
+        print('AVX2 detected')
+        CFLAGS.append('-DSHUFFLE_AVX2_ENABLED')
+        sources += [f for f in glob('c-blosc/blosc/*.c') if 'avx2' in f]
+        if os.name == 'posix':
+            CFLAGS.append('-mavx2')
+        elif os.name == 'nt':
+            def_macros += [('__AVX2__', 1)]
 
 
-classifiers = """\
-Development Status :: 4 - Beta
-Intended Audience :: Developers
-Intended Audience :: Information Technology
-Intended Audience :: Science/Research
-License :: OSI Approved :: BSD License
-Programming Language :: Python
-Topic :: Software Development :: Libraries :: Python Modules
-Operating System :: Microsoft :: Windows
-Operating System :: Unix
-"""
-setup(name="bcolz",
-      version=VERSION,
-      description='columnar and compressed data containers.',
-      long_description="""\
+tests_require = []
+if v < (3,):
+    tests_require.extend(['unittest2', 'mock'])
+
+# compile and link code instrumented for coverage analysis
+if os.getenv('TRAVIS') and os.getenv('CI') and v[0:2] == (2, 7):
+    CFLAGS.extend(["-fprofile-arcs", "-ftest-coverage"])
+    LFLAGS.append("-lgcov")
+
+setup(
+    name="bcolz",
+    use_scm_version={
+        'version_scheme': 'guess-next-dev',
+        'local_scheme': 'dirty-tag',
+        'write_to': 'bcolz/version.py'
+    },
+    description='columnar and compressed data containers.',
+    long_description="""\
 
 bcolz provides columnar and compressed data containers.  Column
 storage allows for efficiently querying tables with a large number of
@@ -211,28 +170,60 @@ internally by Blosc, a high-performance compressor that is optimized
 for binary data.
 
 """,
-      classifiers=filter(None, classifiers.split("\n")),
-      author='Francesc Alted',
-      author_email='francesc@blosc.io',
-      maintainer='Francesc Alted',
-      maintainer_email='francesc@blosc.io',
-      url='https://github.com/Blosc/bcolz',
-      license='http://www.opensource.org/licenses/bsd-license.php',
-      # It is better to upload manually to PyPI
-      #download_url = 'http://github.com/downloads/Blosc/bcolz/python-bcolz
-      # -%s.tar.gz' % (VERSION,),
-      platforms=['any'],
-      cmdclass={'build_ext': build_ext},
-      ext_modules=[
-          Extension("bcolz.carray_ext",
-                    include_dirs=inc_dirs,
-                    define_macros=def_macros,
-                    sources=sources,
-                    library_dirs=lib_dirs,
-                    libraries=libs,
-                    extra_link_args=LFLAGS,
-                    extra_compile_args=CFLAGS),
-      ],
-      packages=['bcolz', 'bcolz.tests'],
-      package_data={'bcolz': ['carray_ext.pxd']},
+    classifiers=[
+        'Development Status :: 4 - Beta',
+        'Intended Audience :: Developers',
+        'Intended Audience :: Information Technology',
+        'Intended Audience :: Science/Research',
+        'License :: OSI Approved :: BSD License',
+        'Programming Language :: Python',
+        'Topic :: Software Development :: Libraries :: Python Modules',
+        'Operating System :: Microsoft :: Windows',
+        'Operating System :: Unix',
+        'Programming Language :: Python :: 2',
+        'Programming Language :: Python :: 2.6',
+        'Programming Language :: Python :: 2.7',
+        'Programming Language :: Python :: 3',
+        'Programming Language :: Python :: 3.3',
+        'Programming Language :: Python :: 3.4',
+    ],
+    author='Francesc Alted',
+    author_email='francesc@blosc.org',
+    maintainer='Francesc Alted',
+    maintainer_email='francesc@blosc.org',
+    url='https://github.com/Blosc/bcolz',
+    license='BSD',
+    platforms=['any'],
+    ext_modules=[
+        Extension(
+            'bcolz.carray_ext',
+            include_dirs=inc_dirs,
+            define_macros=def_macros,
+            sources=sources,
+            library_dirs=lib_dirs,
+            libraries=libs,
+            extra_link_args=LFLAGS,
+            extra_compile_args=CFLAGS
+        )
+    ],
+    install_requires=['numpy>=1.7'],
+    setup_requires=[
+        'cython>=0.22',
+        'numpy>=1.7',
+        'setuptools>18.0',
+        'setuptools-scm>1.5.4'
+    ],
+    tests_require=tests_require,
+    extras_require=dict(
+        optional=[
+            'numexpr>=2.5.2',
+            'dask>=0.9.0',
+            'pandas',
+            'tables'
+        ],
+        test=tests_require
+    ),
+    packages=find_packages(),
+    package_data={'bcolz': ['carray_ext.pxd']},
+    cmdclass=LazyCommandClass(),
 )

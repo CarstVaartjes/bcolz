@@ -2,7 +2,7 @@
 #
 #       License: BSD
 #       Created: August 5, 2010
-#       Author:  Francesc Alted - francesc@blosc.io
+#       Author:  Francesc Alted - francesc@blosc.org
 #
 ########################################################################
 
@@ -105,27 +105,29 @@ def to_ndarray(array, dtype, arrlen=None, safe=True):
     if not safe:
         return array
 
-    if dtype is None:
-        return np.array(array)
+    if not isinstance(array, np.ndarray) and dtype is None:
+        array = np.array(array)
 
     # Arrays with a 0 stride are special
-    if type(array) == np.ndarray and array.strides[0] == 0:
+    if type(array) == np.ndarray and len(array.strides) and array.strides[0] == 0:
         if array.dtype != dtype.base:
             raise TypeError("dtypes do not match")
         return array
 
     # Ensure that we have an ndarray of the correct dtype
-    if type(array) != np.ndarray or array.dtype != dtype.base:
-        try:
-            array = np.array(array, dtype=dtype.base)
-        except ValueError:
-            raise ValueError("cannot convert to an ndarray object")
+    if dtype is not None:
+        if type(array) != np.ndarray or array.dtype != dtype.base:
+            try:
+                array = np.array(array, dtype=dtype.base)
+            except ValueError:
+                raise ValueError("cannot convert to an ndarray object")
 
     # We need a contiguous array
     if not array.flags.contiguous:
         array = array.copy()
+
+    # We treat scalars like undimensional arrays
     if len(array.shape) == 0:
-        # We treat scalars like undimensional arrays
         array.shape = (1,)
 
     # Check if we need a broadcast
@@ -150,7 +152,8 @@ def human_readable_size(size):
     else:
         return "%.2f TB" % (size / float(2**40))
 
-def build_carray(array,rootdir):
+
+def build_carray(array, rootdir):
     """ Used in ctable.__reduce__
 
     Pickling functions can't be in pyx files.  Putting this tiny helper
@@ -161,6 +164,34 @@ def build_carray(array,rootdir):
         return carray(rootdir=rootdir)
     else:
         return carray(array)
+
+
+def quantize(data, significant_digits):
+    """Quantize data to improve compression.
+
+    Data is quantized using around(scale*data)/scale, where scale is
+    2**bits, and bits is determined from the significant_digits.  For
+    example, if significant_digits=1, bits will be 4.
+
+    """
+    import math
+
+    if data.dtype.kind != 'f':
+        raise TypeError("quantize is meant only for floating point data")
+
+    if not significant_digits:
+        return data
+
+    precision = 10. ** -significant_digits
+    exp = math.log(precision, 10)
+    if exp < 0:
+        exp = int(math.floor(exp))
+    else:
+        exp = int(math.ceil(exp))
+    bits = math.ceil(math.log(10. ** -exp, 2))
+    scale = 2. ** bits
+    return np.around(scale * data) / scale
+
 
 
 # Main part

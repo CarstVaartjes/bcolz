@@ -2,7 +2,7 @@
 #
 #       License: BSD
 #       Created: January 18, 2011
-#       Author:  Francesc Alted - francesc@blosc.io
+#       Author:  Francesc Alted - francesc@blosc.org
 #
 ########################################################################
 
@@ -15,6 +15,8 @@ from bcolz.py2help import xrange
 from bcolz.tests.common import (
     MayBeDiskTest, TestCase, unittest)
 
+# Global variable for frame depth testing
+GVAR = 1000
 
 class listTest(MayBeDiskTest):
 
@@ -112,12 +114,12 @@ class whereblocksTest(MayBeDiskTest):
         self.assertEqual(s, (N - 1) * (N / 2))  # Gauss summation formula
 
     def test02(self):
-        """Testing `whereblocks` method with a `outfields` with 2 fields"""
+        """Testing `whereblocks` method with a `outcols` with 2 fields"""
         N = self.N
         ra = np.fromiter(((i, i, i * 3) for i in xrange(N)), dtype='i4,f8,i8')
         t = bcolz.ctable(ra)
         l, s = 0, 0
-        for block in t.whereblocks('f1 < f2', outfields=('f1', 'f2')):
+        for block in t.whereblocks('f1 < f2', outcols=('f1', 'f2')):
             self.assertEqual(block.dtype.names, ('f1', 'f2'))
             l += len(block)
             s += block['f1'].sum()
@@ -125,12 +127,12 @@ class whereblocksTest(MayBeDiskTest):
         self.assertEqual(s, (N - 1) * (N / 2))  # Gauss summation formula
 
     def test03(self):
-        """Testing `whereblocks` method with a `outfields` with 1 field"""
+        """Testing `whereblocks` method with a `outcols` with 1 field"""
         N = self.N
         ra = np.fromiter(((i, i, i * 3) for i in xrange(N)), dtype='i4,f8,i8')
         t = bcolz.ctable(ra)
         l, s = 0, 0
-        for block in t.whereblocks('f1 < f2', outfields=('f1',)):
+        for block in t.whereblocks('f1 < f2', outcols=('f1',)):
             self.assertEqual(block.dtype.names, ('f1',))
             l += len(block)
             s += block['f1'].sum()
@@ -189,6 +191,33 @@ class whereblocksTest(MayBeDiskTest):
         self.assertEqual(l, N - M - 2)
         self.assertEqual(s, np.arange(M + 1, N - 1).sum())
 
+    def test08(self):
+        """Testing `whereblocks` method with global and local variables"""
+        N = self.N
+        lvar = GVAR
+        ra = np.fromiter(((i, i * 2., i * 3)
+                          for i in xrange(N)), dtype='i4,f8,i8')
+        t = bcolz.ctable(ra)
+        l, s = 0, 0
+        for block in t.whereblocks('(f1 + lvar) < (f2 + GVAR)'):
+            l += len(block)
+            s += block['f0'].sum()
+        self.assertEqual(l, N - 1)
+        self.assertEqual(s, (N - 1) * (N / 2))  # Gauss summation formula
+
+    def test09(self):
+        """Testing `whereblocks` method with vm different than default"""
+        N = self.N
+        ra = np.fromiter(((i, i * 2., i * 3)
+                          for i in xrange(N)), dtype='i4,f8,i8')
+        t = bcolz.ctable(ra)
+        l, s = 0, 0
+        for block in t.whereblocks('f1 < f2', vm="python"):
+            l += len(block)
+            s += block['f0'].sum()
+        self.assertEqual(l, N - 1)
+        self.assertEqual(s, (N - 1) * (N / 2))  # Gauss summation formula
+
 
 class small_whereblocksTest(whereblocksTest, TestCase):
     N = 120
@@ -206,6 +235,121 @@ class small_whereblocksDiskTest(whereblocksTest, TestCase):
 class big_whereblocksDiskTest(whereblocksTest, TestCase):
     N = 10000
     disk = True
+
+
+class fetchwhereTest(MayBeDiskTest):
+
+    def test00(self):
+        """Testing `fetchwhere` method with only an expression"""
+        N = self.N
+        ra = np.fromiter(((i, i * 2., i * 3)
+                          for i in xrange(N)), dtype='i4,f8,i8')
+        t = bcolz.ctable(ra)
+        ct = t.fetchwhere('f1 < f2')
+        l, s = len(ct), ct['f0'].sum()
+        self.assertEqual(l, N - 1)
+        self.assertEqual(s, (N - 1) * (N / 2))  # Gauss summation formula
+
+    def test01(self):
+        """Testing `fetchwhere` method with a `outcols` with 2 fields"""
+        N = self.N
+        ra = np.fromiter(((i, i, i * 3) for i in xrange(N)), dtype='i4,f8,i8')
+        t = bcolz.ctable(ra)
+        ct = t.fetchwhere('f1 < f2', outcols=('f1', 'f2'))
+        self.assertEqual(ct.names, ['f1', 'f2'])
+        l, s = len(ct), ct['f1'].sum()
+        self.assertEqual(l, N - 1)
+        self.assertEqual(s, (N - 1) * (N / 2))  # Gauss summation formula
+
+    def test02(self):
+        """Testing `fetchwhere` method with a `outcols` with 1 field"""
+        N = self.N
+        ra = np.fromiter(((i, i, i * 3) for i in xrange(N)), dtype='i4,f8,i8')
+        t = bcolz.ctable(ra)
+        ct = t.fetchwhere('f1 < f2', outcols=('f1',))
+        self.assertEqual(ct.names, ['f1'])
+        l, s = len(ct), ct['f1'].sum()
+        self.assertEqual(l, N - 1)
+        self.assertEqual(s, (N - 1) * (N / 2))  # Gauss summation formula
+
+    def test03(self):
+        """Testing `fetchwhere` method with a `limit`, `skip` parameter"""
+        N, M = self.N, 101
+        ra = np.fromiter(((i, i * 2., i * 3)
+                          for i in xrange(N)), dtype='i4,f8,i8')
+        t = bcolz.ctable(ra)
+        l, s = 0, 0
+        ct = t.fetchwhere('f1 < f2', limit=N - M - 2, skip=M)
+        l, s = len(ct), ct['f0'].sum()
+        self.assertEqual(l, N - M - 2)
+        self.assertEqual(s, np.arange(M + 1, N - 1).sum())
+
+    def test04(self):
+        """Testing `fetchwhere` method with an `out_flavor` parameter"""
+        N = self.N
+        ra = np.fromiter(((i, i * 2., i * 3)
+                          for i in xrange(N)), dtype='i4,f8,i8')
+        t = bcolz.ctable(ra)
+        ct = t.fetchwhere('f1 < f2', out_flavor="numpy")
+        self.assertEqual(type(ct), np.ndarray)
+        l, s = len(ct), ct['f0'].sum()
+        self.assertEqual(l, N - 1)
+        self.assertEqual(s, (N - 1) * (N / 2))  # Gauss summation formula
+
+    def test05(self):
+        """Testing `fetchwhere` method with global and local variables"""
+        N = self.N
+        lvar = GVAR
+        ra = np.fromiter(((i, i * 2., i * 3)
+                          for i in xrange(N)), dtype='i4,f8,i8')
+        t = bcolz.ctable(ra)
+        ct = t.fetchwhere('(f1 + lvar) < (f2 + GVAR)', out_flavor="numpy")
+        self.assertEqual(type(ct), np.ndarray)
+        l, s = len(ct), ct['f0'].sum()
+        self.assertEqual(l, N - 1)
+        self.assertEqual(s, (N - 1) * (N / 2))  # Gauss summation formula
+
+
+class small_fetchwhereTest(fetchwhereTest, TestCase):
+    N = 120
+
+class big_fetchwhereTest(fetchwhereTest, TestCase):
+    N = 10000
+
+
+class stringTest(TestCase):
+
+    def test_strings(self):
+        """Testing that we can use strings in a variable"""
+        dtype = np.dtype([("a", "|S5"),
+                          ("b", np.uint8),
+                          ("c", np.int32),
+                          ("d", np.float32)])
+        t = bcolz.ctable(np.empty(0, dtype=dtype))
+        strval = b"abcdf"
+        t.append(("abcde", 22, 34566, 1.2354))
+        t.append((strval, 23, 34567, 1.2355))
+        t.append(("abcde", 22, 34566, 1.2354))
+        res = list(t.eval('a == strval'))
+        self.assertTrue(res == [False, True, False],
+                        "querying strings not working correctly")
+
+    def test_strings2(self):
+        """Testing that we can use strings in a variable (II)"""
+        dtype = np.dtype([("STATE", "|S32"),
+                          ("b", np.int32)])
+        recarr = np.array([('California', 1), ('Dakota', 9)], dtype=dtype)
+        t = bcolz.ctable(recarr)
+        res = [tuple(row) for row in t.where(
+            "STATE == b'California'", outcols=["nrow__", "b"])]
+        self.assertTrue(res == [(0, 1)],
+                        "querying strings not working correctly")
+        # test with unicode
+        res = [tuple(row) for row in t.where(
+            u"STATE == b'California'", outcols=["nrow__", "b"])]
+        self.assertTrue(res == [(0, 1)],
+                        "querying strings not working correctly with unicode querystring")
+
 
 
 if __name__ == '__main__':

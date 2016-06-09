@@ -2,7 +2,7 @@
 #
 #       License: BSD
 #       Created: July 15, 2014
-#       Author:  Francesc Alted - francesc@blosc.io
+#       Author:  Francesc Alted - francesc@blosc.org
 #
 ########################################################################
 
@@ -21,8 +21,8 @@ class Defaults(object):
         self.choices = {}
 
         # Choices setup
-        self.choices['eval_out_flavor'] = ("carray", "numpy")
-        self.choices['eval_vm'] = ("numexpr", "python")
+        self.choices['out_flavor'] = ("bcolz", "carray", "numpy")
+        self.choices['vm'] = ("numexpr", "python", "dask")
 
     def check_choices(self, name, value):
         if value not in self.choices[name]:
@@ -34,41 +34,48 @@ class Defaults(object):
             raise ValueError(
                 "this needs to be a dictionary and you "
                 "passed '%s' " % type(value))
-        if ('clevel' not in value or
-                'shuffle' not in value or
-                'cname' not in value):
+        entries = ['clevel', 'shuffle', 'cname', 'quantize']
+        if not all(k in value for k in entries):
             raise ValueError(
-                "The dictionary must have the next entries: "
-                "'clevel', 'shuffle' and 'cname'")
-        clevel, shuffle, cname = bcolz.cparams._checkparams(
-            value['clevel'], value['shuffle'], value['cname'])
-        return {'clevel': clevel, 'shuffle': shuffle, 'cname': cname}
+                "The dictionary must have the next entries: %s" % entries)
+        # Return a dictionary with the proper defaults
+        return dict(zip(entries, bcolz.cparams._checkparams(**value)))
 
     #
     # Properties start here...
     #
 
     @property
-    def eval_vm(self):
-        return self.__eval_vm
+    def vm(self):
+        return self.__vm
 
-    @eval_vm.setter
-    def eval_vm(self, value):
-        self.check_choices('eval_vm', value)
+    @vm.setter
+    def vm(self, value):
+        self.check_choices('vm', value)
         if value == "numexpr" and not bcolz.numexpr_here:
-            raise (ValueError,
-                   "cannot use `numexpr` virtual machine "
-                   "(minimum required version is probably not installed)")
-        self.__eval_vm = value
+            raise ValueError(
+                "cannot use `numexpr` virtual machine "
+                "(minimum required version is probably not installed)")
+        elif value == "dask" and not bcolz.dask_here:
+            raise ValueError(
+                "cannot use `dask` virtual machine "
+                "(minimum required version is probably not installed)")
+        self.__vm = value
+
+    # Keep eval_vm for backward compatibility
+    eval_vm = vm
 
     @property
-    def eval_out_flavor(self):
-        return self.__eval_out_flavor
+    def out_flavor(self):
+        return self.__out_flavor
 
-    @eval_out_flavor.setter
-    def eval_out_flavor(self, value):
-        self.check_choices('eval_out_flavor', value)
-        self.__eval_out_flavor = value
+    @out_flavor.setter
+    def out_flavor(self, value):
+        self.check_choices('out_flavor', value)
+        self.__out_flavor = value
+
+    # Keep eval_out_flavor for backward compatibility
+    eval_out_flavor = out_flavor
 
     @property
     def cparams(self):
@@ -84,21 +91,28 @@ defaults = Defaults()
 
 # Default values start here...
 
-defaults.eval_out_flavor = "carray"
-"""
-The flavor for the output object in `eval()`.  It can be 'carray' or
-'numpy'.  Default is 'carray'.
+defaults.out_flavor = "bcolz"
+"""The flavor for the output object in `eval()`.  It can be 'bcolz'
+or 'numpy'.  Default is 'bcolz'.
+
 """
 
-defaults.eval_vm = "numexpr" if bcolz.numexpr_here else "python"
-"""
-The virtual machine to be used in computations (via `eval`).  It can
-be 'numexpr' or 'python'.  Default is 'numexpr', if it is installed.
-If not, then the default is 'python'.
+if bcolz.numexpr_here:
+    defaults.vm = "numexpr"
+elif bcolz.dask_here:
+    defaults.vm = "dask"
+else:
+    defaults.vm = "python"
+"""The virtual machine to be used in computations (via `eval`).  It
+can be 'numexpr', 'dask' or 'python'.  Default is 'numexpr', if it is
+installed.  If not, 'dask' is used, if installed.  And if neither of
+these are installed, then the 'python' interpreter is used.
+
 """
 
-defaults.cparams = {'clevel': 5, 'shuffle': True, 'cname': 'blosclz'}
-"""
-The defaults for parameters used in compression.  You can change
+defaults.cparams = {'clevel': 5, 'shuffle': bcolz.SHUFFLE,
+                    'cname': 'lz4', 'quantize': 0}
+"""The defaults for parameters used in compression.  You can change
 them more comfortably by using the `cparams.setdefaults()` method.
+
 """
